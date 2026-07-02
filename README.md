@@ -4,7 +4,10 @@
 [![license](https://img.shields.io/npm/l/browservec)](./LICENSE)
 
 In-browser WebGPU vector store with custom WGSL kernels, for fast offline /
-in-session retrieval. See [REQUIREMENTS.md](./REQUIREMENTS.md) for the full spec.
+in-session retrieval. See [REQUIREMENTS.md](./REQUIREMENTS.md) for the full spec,
+or [docs/](./docs/) for architecture notes, the full API reference, and
+per-subsystem internals (quantization, IVF, persistence, Worker offload,
+CPU fallback) aimed at contributors.
 
 > **Status: M1 + M2 + M3 + M4 + M5** — WebGPU flat brute-force (cosine/dot/L2,
 > configurable dim, CPU top-k), persistence to OPFS/IndexedDB with a versioned
