@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — Real-Embeddings Benchmark</title>
+<!--
+  transformersEmbedder() deliberately loads @xenova/transformers via a
+  non-literal, @vite-ignore'd dynamic import (src/embed/transformers.ts) so
+  neither the library nor the model land in BrowserVec's core bundle. The
+  tradeoff: browsers can't resolve a bare specifier like '@xenova/transformers'
+  from a dynamic import() on their own — that's what import maps are for, and
+  it's needed here even under Vite's dev server, since @vite-ignore skips
+  Vite's own rewriting for this specific call site. Any page that calls
+  transformersEmbedder() needs a mapping like this one.
+-->
+<script type="importmap">
+{ "imports": { "@xenova/transformers": "/node_modules/@xenova/transformers/dist/transformers.min.js" } }
+</script>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem auto; max-width: 1080px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  h2 { font-size: 1rem; margin: 1.5rem 0 .5rem; border-bottom: 1px solid #eee; padding-bottom: .25rem; }
+  .subtitle { color: #666; margin-top: 0; font-size: .9rem; }
+  .note { color: #888; font-size: .8rem; background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: .6rem .8rem; margin: .75rem 0; }
+  .controls { display: flex; gap: .75rem; margin: 1rem 0; flex-wrap: wrap; align-items: end; }
+  .controls label { font-size: .85rem; display: flex; flex-direction: column; gap: .2rem; }
+  .controls input, .controls select { padding: .4rem; border: 1px solid #ddd; border-radius: 4px; font: inherit; font-size: .85rem; }
+  .controls button { padding: .5rem 1rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font: inherit; font-weight: 600; }
+  .controls button:disabled { opacity: .5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; margin: .75rem 0; }
+  th, td { padding: .5rem .6rem; text-align: right; border-bottom: 1px solid #eee; }
+  th { text-align: right; background: #fafafa; font-weight: 600; color: #555; }
+  td:first-child, th:first-child { text-align: left; }
+  .good { color: #2e7d32; font-weight: 600; }
+  .warn { color: #e65100; }
+  .bad { color: #d32f2f; }
+  .chart { margin: .5rem 0 1.5rem; }
+  .chart .row { display: flex; align-items: center; margin: 3px 0; font-size: .78rem; }
+  .chart .row .lbl { width: 220px; text-align: right; padding-right: .5rem; color: #555; flex-shrink: 0; }
+  .chart .row .bar-wrap { flex: 1; }
+  pre { background: #111; color: #b9f; padding: .75rem; border-radius: 6px; overflow: auto; font-size: .78rem; max-height: 320px; }
+  .log-area { margin-top: 1rem; }
+  .log-area summary { cursor: pointer; font-weight: 600; color: #555; font-size: .85rem; }
+  .qcard { border: 1px solid #eee; border-radius: 6px; padding: .6rem .8rem; margin: .5rem 0; font-size: .82rem; }
+  .qcard .qtext { font-weight: 600; color: #1a73e8; }
+  .qcard .hit { padding: .25rem 0; border-top: 1px solid #f3f3f3; }
+  .qcard .hit .score { color: #888; margin-right: .5rem; }
+  .qcard .hit .topic { color: #aaa; font-size: .72rem; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>Real-Embeddings Benchmark</h1>
+<p class="subtitle">Same engines as the <a href="benchmark-dashboard.html">synthetic dashboard</a> — BrowserVec (flat + quantized),
+hnswlib-wasm, voy-search, Orama, Vectorious — but the vectors are real sentence embeddings from a real
+transformer model, computed in-browser over a hand-written corpus of 180 factual documents across 12 topics.</p>
+
+<div class="note">
+  Synthetic clustered vectors (the other dashboard) are useful for raw throughput comparisons, but they have
+  no real semantic structure — every cluster is equally separable, which flatters approximate methods.
+  Real embeddings have uneven density, near-duplicate topics, and genuine ambiguity, which is what actually
+  stresses recall. The quantitative metrics below (latency, recall, memory, CPU/GPU/transfer) use the exact
+  same harness as the synthetic dashboard — only the vector source differs. A qualitative section at the
+  bottom runs hand-written natural-language queries through BrowserVec and shows the retrieved document text,
+  so you can eyeball whether the matches actually make sense.
+</div>
+
+<h2>1. Embedding model</h2>
+<div class="controls">
+  <label>Model
+    <select id="modelKey">
+      <option value="minilm" selected>all-MiniLM-L6-v2 (384d, general-purpose)</option>
+      <option value="bge">BGE-small-en-v1.5 (384d, retrieval-tuned)</option>
+      <option value="e5">E5-small-v2 (384d, retrieval-tuned)</option>
+      <option value="nomic">nomic-embed-text-v1 (768d, retrieval-tuned)</option>
+    </select>
+  </label>
+  <label>Backend
+    <select id="backend">
+      <option value="wasm" selected>wasm (broad support)</option>
+      <option value="webgpu">webgpu (faster, newer browsers)</option>
+    </select>
+  </label>
+  <label>Corpus subset
+    <select id="corpusSize">
+      <option value="50">50 docs</option>
+      <option value="100">100 docs</option>
+      <option value="180" selected>180 docs (all)</option>
+    </select>
+  </label>
+  <label>k (neighbors)
+    <select id="kVal">
+      <option value="5" selected>5</option>
+      <option value="10">10</option>
+      <option value="20">20</option>
+    </select>
+  </label>
+  <label>HNSW efConstruction / M
+    <select id="hnswParams">
+      <option value="100,12">100 / 12 (fast build, lower recall)</option>
+      <option value="200,16" selected>200 / 16 (default)</option>
+      <option value="400,32">400 / 32 (slow build, higher recall)</option>
+    </select>
+  </label>
+  <label>HNSW efSearch
+    <select id="hnswEfSearch">
+      <option value="16">16 (fast, lower recall)</option>
+      <option value="64" selected>64 (balanced)</option>
+      <option value="128">128 (slower, higher recall)</option>
+    </select>
+  </label>
+  <button id="runBtn">Embed corpus &amp; run benchmark</button>
+</div>
+<div class="note" id="configNote">
+  Model weights download once (tens of MiB) and are cached by the browser — later runs with the same model
+  are instant to load, but embedding the corpus still runs fresh each time (it's the point of the benchmark).
+</div>
+
+<h2>2. Quantitative results</h2>
+<table id="resultsTable">
+  <thead>
+    <tr>
+      <th>Engine</th>
+      <th>Ingest</th>
+      <th>Avg latency</th>
+      <th>QPS</th>
+      <th>CPU</th>
+      <th>GPU</th>
+      <th>Transfer</th>
+      <th>Recall@k</th>
+      <th>Memory (est.)</th>
+    </tr>
+  </thead>
+  <tbody id="resultsBody"><tr><td colspan="9" style="text-align:center;color:#999;">Run the benchmark to see results.</td></tr></tbody>
+</table>
+
+<div class="chart" id="latencyChart"></div>
+<div class="chart" id="breakdownChart"></div>
+<div class="chart" id="gpuBusyChart"></div>
+<div class="chart" id="memoryChart"></div>
+<div class="chart" id="recallChart"></div>
+
+<h2>3. Qualitative semantic search</h2>
+<p class="note">Twelve hand-written natural-language queries, run through BrowserVec (WebGPU flat) using the same
+real embeddings as above. Each query is phrased to require actual semantic understanding — synonyms, paraphrase,
+indirect reference — not keyword overlap. The expected topic is shown for reference; a mismatch isn't
+necessarily wrong (cross-topic sentences can be legitimately close), it's there so you can judge the results yourself.</p>
+<div id="qualitative"></div>
+
+<details class="log-area">
+  <summary>Detailed log</summary>
+  <pre id="log">ready.</pre>
+</details>
+
+<script type="module">
+import { BrowserVec, transformersEmbedder } from '../src/index.ts';
+import { corpus as fullCorpus, queries as handQueries } from './data/real-corpus.mjs';
+import {
+  standardEngines, runEngine, recallAgainst, makeNaiveBruteForceEngine,
+  createBenchDevice, renderResultsTable, renderStandardCharts,
+} from './lib/engines.js';
+
+const $ = (id) => document.getElementById(id);
+const log = (msg, cls = '') => { $('log').innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`; };
+
+// Retrieval-tuned models expect asymmetric prefixes on queries vs. documents —
+// this is each model's own documented convention (E5: "query:"/"passage:",
+// BGE: an instruction prefix on queries only, Nomic: "search_query:"/
+// "search_document:"), not something BrowserVec imposes. Applying it here (by
+// prepending before calling the embedder) is what "using these models
+// correctly" looks like — skipping it noticeably hurts their recall.
+const MODELS = {
+  minilm: { id: 'Xenova/all-MiniLM-L6-v2', dim: 384, queryPrefix: '', docPrefix: '' },
+  bge: { id: 'Xenova/bge-small-en-v1.5', dim: 384, queryPrefix: 'Represent this sentence for searching relevant passages: ', docPrefix: '' },
+  e5: { id: 'Xenova/e5-small-v2', dim: 384, queryPrefix: 'query: ', docPrefix: 'passage: ' },
+  nomic: { id: 'Xenova/nomic-embed-text-v1', dim: 768, queryPrefix: 'search_query: ', docPrefix: 'search_document: ' },
+};
+
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// The corpus is grouped by topic (12 topics x 15 docs, see real-corpus.mjs), so
+// a plain prefix slice() of a small subset only covers the first few topics —
+// which makes the qualitative section look broken for the missing topics (no
+// candidate document exists for them at all) when the embeddings are actually
+// fine. Round-robin across topics instead, so even a 50-doc subset samples
+// every topic.
+function interleavedSubset(docs, n) {
+  if (n >= docs.length) return docs;
+  const byTopic = new Map();
+  for (const d of docs) {
+    if (!byTopic.has(d.topic)) byTopic.set(d.topic, []);
+    byTopic.get(d.topic).push(d);
+  }
+  const groups = [...byTopic.values()];
+  const out = [];
+  for (let i = 0; out.length < n; i++) {
+    let added = false;
+    for (const g of groups) {
+      if (i < g.length) { out.push(g[i]); added = true; if (out.length === n) break; }
+    }
+    if (!added) break;
+  }
+  return out;
+}
+
+async function embedAll() {
+  const modelCfg = MODELS[$('modelKey').value];
+  const backend = $('backend').value;
+  const n = parseInt($('corpusSize').value);
+  const docs = interleavedSubset(fullCorpus, n);
+
+  log(`Loading ${modelCfg.id} (${modelCfg.dim}d, backend=${backend})...`);
+  const embedder = await transformersEmbedder({
+    model: modelCfg.id,
+    dimension: modelCfg.dim,
+    device: backend,
+    onProgress: (info) => {
+      if (info?.status === 'progress' && info.file) {
+        log(`  downloading ${info.file}: ${(info.loaded / (1024 * 1024)).toFixed(0)} / ${(info.total / (1024 * 1024)).toFixed(0)} MiB`, 'dim');
+      }
+    },
+  });
+  log(`model ready.`, 'good');
+
+  log(`Embedding ${docs.length} documents...`);
+  const t0 = performance.now();
+  const docVectors = await embedder.embed(docs.map((d) => modelCfg.docPrefix + d.text));
+  log(`embedded corpus in ${(performance.now() - t0).toFixed(0)} ms (${(docs.length / ((performance.now() - t0) / 1000)).toFixed(1)} docs/s)`, 'good');
+
+  log(`Embedding ${handQueries.length} hand-written queries...`);
+  const queryVectors = await embedder.embed(handQueries.map((q) => modelCfg.queryPrefix + q.text));
+  log(`done.`, 'good');
+
+  return { modelCfg, docs, docVectors, queryVectors };
+}
+
+function recallQueries(n, corpusVectors, count, seed = 1337) {
+  const rand = mulberry32(seed);
+  return Array.from({ length: Math.min(count, n) }, () => corpusVectors[Math.floor(rand() * n)]);
+}
+
+async function runAll() {
+  const k = parseInt($('kVal').value);
+  const [efConstruction, m] = $('hnswParams').value.split(',').map(Number);
+  const efSearch = Math.max(parseInt($('hnswEfSearch').value), k);
+
+  $('runBtn').disabled = true;
+  $('log').textContent = '';
+  $('resultsBody').innerHTML = `<tr><td colspan="9" style="text-align:center;color:#999;">Embedding corpus…</td></tr>`;
+  $('qualitative').innerHTML = '';
+
+  let embedded;
+  try {
+    embedded = await embedAll();
+  } catch (e) {
+    log(`ERROR loading/embedding model: ${e.message}`, 'bad');
+    log(`Make sure @xenova/transformers is installed: npm install @xenova/transformers`, 'bad');
+    console.error(e);
+    $('resultsBody').innerHTML = `<tr><td colspan="9" style="text-align:center;color:#d32f2f;">Embedding failed — see log below.</td></tr>`;
+    $('runBtn').disabled = false;
+    return;
+  }
+  const { modelCfg, docs, docVectors, queryVectors } = embedded;
+  const dim = modelCfg.dim;
+  const n = docs.length;
+
+  $('resultsBody').innerHTML = `<tr><td colspan="9" style="text-align:center;color:#999;">Running vector-search benchmark…</td></tr>`;
+
+  const corpus = { vectors: docVectors, ids: docs.map((d) => d.id) };
+  // Query vectors for the *quantitative* recall metric are real embedded
+  // corpus documents (self-retrieval, same convention as the synthetic
+  // dashboard) — not the 12 hand-written queries, which get their own
+  // qualitative section below since they don't have a single "correct" id.
+  const queries = recallQueries(n, docVectors, Math.min(n, 50));
+
+  const gtRun = await runEngine(makeNaiveBruteForceEngine(dim), corpus, queries, k, log);
+  const groundTruth = gtRun.perQueryIds.map((ids) => new Set(ids));
+
+  const engines = standardEngines(dim, n, { efConstruction, m, efSearch }, log);
+
+  const results = [{ ...gtRun, recall: 1 }];
+  for (const engine of engines) {
+    try {
+      const r = await runEngine(engine, corpus, queries, k, log);
+      const recall = recallAgainst(r.perQueryIds, groundTruth, k);
+      log(`  recall@${k} vs. ground truth = ${(recall * 100).toFixed(1)}%`);
+      results.push({ ...r, recall });
+    } catch (e) {
+      log(`ERROR on ${engine.name}: ${e.message}`, 'bad');
+      console.error(e);
+    }
+  }
+
+  renderResultsTable($('resultsBody'), results);
+  renderStandardCharts(
+    { latency: 'latencyChart', breakdown: 'breakdownChart', gpuBusy: 'gpuBusyChart', memory: 'memoryChart', recall: 'recallChart' },
+    results,
+  );
+  $('configNote').textContent =
+    `${modelCfg.id} (${dim}d) via ${$('backend').value} · ${n} docs · k=${k} · ` +
+    `HNSW: efConstruction=${efConstruction}, M=${m}, efSearch=${efSearch}.`;
+
+  await runQualitative(modelCfg, docs, docVectors, queryVectors);
+
+  $('runBtn').disabled = false;
+}
+
+// Builds a fresh BrowserVec (WebGPU flat) instance over the already-embedded
+// corpus, with each document's topic + text attached as metadata, and runs the
+// 12 hand-written queries (already embedded with the model's query prefix in
+// embedAll()) through it — printing the retrieved document text and score,
+// the part a recall percentage alone can't show.
+async function runQualitative(modelCfg, docs, docVectors, queryVectors) {
+  log(`\n--- Qualitative: hand-written queries via BrowserVec ---`);
+  const container = $('qualitative');
+  container.innerHTML = '';
+
+  const device = await createBenchDevice();
+  const db = await BrowserVec.create({
+    dimension: modelCfg.dim, metric: 'cosine', normalize: false, fallback: 'wasm',
+    ...(device ? { device } : {}),
+  });
+  await db.addBatch(docs.map((d, i) => ({
+    id: d.id, vector: docVectors[i], metadata: { topic: d.topic, text: d.text },
+  })));
+
+  for (let i = 0; i < handQueries.length; i++) {
+    const hq = handQueries[i];
+    const hits = await db.query(queryVectors[i], { k: 3 });
+    log(`  "${hq.text}" (expected topic: ${hq.topic})`);
+
+    const card = document.createElement('div');
+    card.className = 'qcard';
+    const hitsHtml = hits.map((h) => {
+      const match = h.metadata?.topic === hq.topic;
+      log(`    ${h.score.toFixed(3)}  [${h.metadata?.topic}]  ${h.metadata?.text}`, match ? 'good' : '');
+      return `
+        <div class="hit">
+          <span class="score">${h.score.toFixed(3)}</span>
+          <span class="${match ? 'good' : ''}">${h.metadata?.text}</span>
+          <span class="topic"> — ${h.metadata?.topic}</span>
+        </div>`;
+    }).join('');
+    card.innerHTML = `<div class="qtext">"${hq.text}"</div><div style="color:#999;font-size:.72rem;">expected topic: ${hq.topic}</div>${hitsHtml}`;
+    container.appendChild(card);
+  }
+
+  db.destroy();
+}
+
+function updateConfigNote() {
+  const n = parseInt($('corpusSize').value);
+  $('configNote').textContent = `${n} docs — click "Embed corpus & run benchmark" to start.`;
+}
+$('corpusSize').onchange = updateConfigNote;
+$('modelKey').onchange = updateConfigNote;
+updateConfigNote();
+
+$('runBtn').onclick = runAll;
+
+log('Ready. Pick a model and click "Embed corpus & run benchmark".');
+</script>
+</body>
+</html>

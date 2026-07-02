@@ -18,6 +18,28 @@ the public API may still shift between minor versions).
   hnswlib's default ~10, cratering recall below `k`); and two new engines —
   voy-search (Rust→WASM kd-tree) and Orama (pure-JS vector search). usearch and
   faiss are documented as unavailable (native Node addons, no browser builds).
+- New `examples/benchmark-real-embeddings.html`: the same multi-engine harness
+  run over real sentence embeddings instead of synthetic clustered vectors —
+  a hand-written, factually-checked 180-document corpus across 12 topics
+  (`examples/data/real-corpus.mjs`), computed in-browser via
+  `transformersEmbedder()` with a choice of four retrieval models
+  (all-MiniLM-L6-v2, BGE-small-en-v1.5, E5-small-v2, nomic-embed-text-v1),
+  each with its model's documented query/document prefix convention applied.
+  Adds a qualitative section: twelve natural-language queries run through
+  BrowserVec, showing the retrieved document text and score directly, since a
+  recall percentage alone doesn't show whether matches are actually sensible.
+  The engine adapters, timing harness, and chart rendering shared with the
+  synthetic dashboard were extracted into `examples/lib/engines.js` so the two
+  benchmarks can't drift apart on what "GPU time" or "recall" means.
+
+### Fixed
+- `transformersEmbedder()` now sets `env.allowLocalModels = false` before
+  loading a model. transformers.js defaults this to `true` and probes a local
+  `/models/...` path first; since this library never ships local model files,
+  every browser consumer hit a spurious probe that many dev/static servers
+  answer with an HTML fallback page instead of a 404 — failing JSON parsing
+  with a confusing `Unexpected token '<'` error instead of going straight to
+  the Hub.
 
 ### Changed
 - Performance pass across the query and ingest hot paths:

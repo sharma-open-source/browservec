@@ -71,7 +71,8 @@
   <li><a href="09-worker-ingest.html"><span class="tag nfr">NFR-8</span> Worker ingest <small>rotate+quantize offloaded to a Web Worker — no main-thread freeze</small></a></li>
   <li><a href="10-chunking.html"><span class="tag nfr">NFR-10</span> Corpus chunking <small>spread vectors across multiple GPU buffers past the per-buffer limit</small></a></li>
   <li><a href="perf-benchmark.html"><span class="tag" style="background:#fce4ec;color:#b71c1c;">Bench</span> Performance benchmark <small>Large-scale perf test: ingest rate, query latency, recall across index types</small></a></li>
-  <li><a href="benchmark-dashboard.html"><span class="tag" style="background:#fce4ec;color:#b71c1c;">Bench</span> Benchmark dashboard <small>BrowserVec vs. hnswlib-wasm vs. Vectorious vs. naive JS brute force — latency, recall, memory, ingest</small></a></li>
+  <li><a href="benchmark-dashboard.html"><span class="tag" style="background:#fce4ec;color:#b71c1c;">Bench</span> Benchmark dashboard <small>BrowserVec vs. hnswlib-wasm vs. voy-search vs. Orama vs. Vectorious vs. naive JS — latency, CPU/GPU/transfer breakdown, recall, memory (synthetic vectors)</small></a></li>
+  <li><a href="benchmark-real-embeddings.html"><span class="tag" style="background:#fce4ec;color:#b71c1c;">Bench</span> Real-embeddings benchmark <small>same engines, but real sentence embeddings (MiniLM, BGE, E5, Nomic) over 180 real documents, plus qualitative semantic search</small></a></li>
 </ul>
 
 <p style="margin-top: 2rem; color: #999; font-size: .85rem;">Open each in a WebGPU-capable browser after running <code>npm run dev</code>.</p>
