@@ -19,6 +19,9 @@ const exampleEntries = readdirSync(resolve(root, 'examples'))
 // work on plain static hosting (GitHub Pages) instead of only Vite's dev server.
 export default defineConfig({
   root,
+  // Deployed at https://sharma-open-source.github.io/browservec/, not domain
+  // root — without this, built asset URLs are absolute from '/' and 404 there.
+  base: '/browservec/',
   build: {
     outDir: resolve(root, 'site'),
     emptyOutDir: true,
