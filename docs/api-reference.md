@@ -77,7 +77,7 @@ linked from each entry below.
 
 ### `ANNConfig`
 
-`nlist` (default ≈ `sqrt(count)`, clamped `[16, 4096]`), `nprobe` (default ≈ 5% of `nlist`), `sampleSize` (default `50_000`, reservoir sample for k-means training), `iters` (default `12` Lloyd iterations), `seed`.
+`nlist` (default ≈ `sqrt(count)`, clamped `[16, 4096]`), `nprobe` (default ≈ 5% of `nlist`), `sampleSize` (default `50_000`, reservoir sample for k-means training), `iters` (default `8` Lloyd iterations), `seed`.
 
 ### `QuantConfig`
 
@@ -99,7 +99,7 @@ linked from each entry below.
 
 ### `Stats` (from `stats()`)
 
-`count`, `deleted?`, `dimension`, `metric`, `device: 'webgpu' | 'wasm'`, `lastQueryMs?`, `persist?: 'opfs' | 'indexeddb'`, `quantBits`, `nlist?` (IVF cluster count once built), `chunks?` (>1 once the corpus spans multiple GPU buffers), `ingest?: 'worker' | 'main-thread'` (where quantized rotate+quantize ran), `train?: 'worker' | 'main-thread'` (where IVF k-means centroid updates ran).
+`count`, `deleted?`, `dimension`, `metric`, `device: 'webgpu' | 'wasm'`, `lastQueryMs?`, `lastQueryGpuMs?` (GPU kernel portion), `lastQueryCpuMs?` (CPU re-rank/filtering portion), `persist?: 'opfs' | 'indexeddb'`, `quantBits`, `nlist?` (IVF cluster count once built), `chunks?` (>1 once the corpus spans multiple GPU buffers), `ingest?: 'worker' | 'main-thread'` (where quantized rotate+quantize ran), `train?: 'worker' | 'main-thread'` (where IVF k-means centroid updates ran).
 
 ### `SupportInfo` (from `isSupported()`)
 

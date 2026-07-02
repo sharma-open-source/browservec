@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 16. React Hooks</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 860px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; }
+  .subtitle { color: #666; margin-top: -.5rem; font-size: .9rem; }
+  .card { border: 1px solid #eee; border-radius: 10px; padding: 1rem; margin-bottom: 1rem; }
+  .card h2 { font-size: .9rem; margin: 0 0 .5rem; color: #1a73e8; }
+  .hooks { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width:600px) { .hooks { grid-template-columns: 1fr; } }
+  .hook-demo { border: 1px solid #ddd; border-radius: 8px; padding: .75rem; background: #fafafa; }
+  .hook-demo h3 { font-size: .8rem; margin: 0 0 .4rem; color: #555; text-transform: uppercase; letter-spacing: .04em; }
+  input, select, textarea { width: 100%; padding: .4rem .5rem; border: 1px solid #ddd; border-radius: 6px; font: inherit; font-size: .85rem; margin-bottom: .4rem; }
+  button { padding: .4rem .8rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font-size: .8rem; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.small { font-size: .75rem; padding: .2rem .5rem; }
+  pre { background: #111; color: #b9f; padding: .5rem .75rem; border-radius: 6px; font-size: .75rem; overflow-x: auto; margin: .25rem 0; white-space: pre-wrap; }
+  .ok { color: #2e7d32; }
+  .bad { color: #c62828; }
+  .dim { color: #888; }
+  .row { display: flex; gap: .4rem; align-items: center; }
+  .badge { display: inline-block; font-size: .65rem; padding: .15rem .4rem; border-radius: 4px; background: #e8f5e9; color: #2e7d32; }
+  .code { font-size: .78rem; background: #f0f0f0; padding: .1rem .3rem; border-radius: 3px; font-family: monospace; }
+  .src { font-size: .75rem; color: #999; margin-top: .5rem; border-top: 1px solid #eee; padding-top: .5rem; }
+</style>
+</head>
+<body>
+<h1>React Hooks for BrowserVec</h1>
+<p class="subtitle">Reusable hooks: <span class="code">useVectorStore</span> · <span class="code">useSimilaritySearch</span> · <span class="code">useEmbedding</span> · <span class="code">useRetriever</span></p>
+
+<div id="root">Loading React demo…</div>
+
+<div class="src">
+  <p>This demo uses <strong>React 19 via esm.sh</strong> — no build step, runs directly in the browser.
+  The hooks below are reusable patterns you can copy into your own React project.</p>
+</div>
+
+<script type="module">
+// ---- React imports from esm.sh (no build step) ----
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'https://esm.sh/react@19?target=es2022';
+import ReactDOM from 'https://esm.sh/react-dom@19/client?target=es2022';
+import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+const { createElement: h, Fragment } = React;
+
+// ====================================================================
+// Hooks
+// ====================================================================
+
+/**
+ * useVectorStore(config)
+ * Creates and manages a BrowserVec instance. Re-creates when config changes.
+ * Returns { store, ready, error, stats, dim, count }.
+ */
+function useVectorStore(config) {
+  const [store, setStore] = useState(null);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState(null);
+  const [stats, setStats] = useState(null);
+  const configKey = useMemo(() => JSON.stringify(config), [config]);
+  const storeRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setReady(false);
+    setError(null);
+    storeRef.current = null;
+    (async () => {
+      try {
+        const db = await BrowserVec.create(config);
+        if (cancelled) { db.destroy(); return; }
+        storeRef.current = db;
+        setStore(db);
+        setStats(db.stats());
+        setReady(true);
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (storeRef.current) {
+        storeRef.current.destroy();
+        storeRef.current = null;
+      }
+    };
+  }, [configKey]);
+
+  useEffect(() => {
+    if (!store) return;
+    const id = setInterval(() => {
+      if (storeRef.current) setStats(storeRef.current.stats());
+    }, 500);
+    return () => clearInterval(id);
+  }, [store]);
+
+  return {
+    store,
+    ready,
+    error,
+    stats,
+    dim: store?.dimension ?? config.dimension,
+    count: store?.count ?? 0,
+  };
+}
+
+/**
+ * useSimilaritySearch(store, queryVector, opts?)
+ * Runs a query whenever the vector reference changes.
+ * Returns { results, loading, error, search }.
+ */
+function useSimilaritySearch(store, queryVector, opts = {}) {
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const search = useCallback(async (vec, overrides = {}) => {
+    if (!store) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const k = overrides.k ?? opts.k ?? 5;
+      const hits = await store.query(vec, { k });
+      setResults(hits);
+      return hits;
+    } catch (e) {
+      setError(e.message);
+      setResults(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [store, opts.k]);
+
+  useEffect(() => {
+    if (queryVector && store) search(queryVector);
+  }, [queryVector, store]);
+
+  return { results, loading, error, search };
+}
+
+/**
+ * useEmbedding(embedder)
+ * Returns { embed, embedding, loading } for embedding text.
+ */
+function useEmbedding(embedder) {
+  const [embedding, setEmbedding] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const embed = useCallback(async (text) => {
+    if (!embedder) return null;
+    setLoading(true);
+    try {
+      const [vec] = await embedder.embed([text]);
+      setEmbedding(vec);
+      return vec;
+    } finally {
+      setLoading(false);
+    }
+  }, [embedder]);
+
+  return { embed, embedding, loading };
+}
+
+/**
+ * useRetriever(store, embedder)
+ * RAG-style: embed a query, search the store, return context.
+ * Returns { retrieve, context, loading, error }.
+ * context is an array of { id, score, metadata }.
+ */
+function useRetriever(store, embedder) {
+  const [context, setContext] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const retrieve = useCallback(async (text, opts = {}) => {
+    if (!store || !embedder) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const k = opts.k ?? 5;
+      const hits = await store.queryText(text, { k });
+      setContext(hits);
+      return hits;
+    } catch (e) {
+      setError(e.message);
+      setContext(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [store, embedder]);
+
+  return { retrieve, context, loading, error };
+}
+
+// ====================================================================
+// Demo app
+// ====================================================================
+
+const DOCS = [
+  { id: 'd1', text: 'WebGPU compute shaders run massively parallel kernels on the GPU for high-performance data processing.' },
+  { id: 'd2', text: 'Cosine similarity measures the angle between two vectors, ranging from -1 (opposite) to 1 (identical).' },
+  { id: 'd3', text: 'TurboQuant uses randomized Hadamard rotation followed by scalar quantization to compress vectors to int8 or int4.' },
+  { id: 'd4', text: 'IVF indexing clusters vectors with k-means on the GPU, then scans only the nearest clusters per query.' },
+  { id: 'd5', text: 'The store persists to OPFS or IndexedDB as a versioned binary snapshot with BVEC magic header.' },
+  { id: 'd6', text: 'A GPU kernel is a function that runs on the graphics processor, processing many threads in parallel.' },
+  { id: 'd7', text: 'OPFS (Origin Private File System) provides high-performance file access for web applications.' },
+  { id: 'd8', text: 'Embeddings are dense vector representations of text that capture semantic meaning.' },
+];
+
+function App() {
+  // === useVectorStore (permanent instance) ===
+  const embedder = useMemo(() => hashingEmbedder({ dimension: 384 }), []);
+  const storeConfig = useMemo(() => ({
+    dimension: 384, metric: 'cosine', embedder,
+  }), []);
+  const { store, ready, error: storeErr, stats, count } = useVectorStore(storeConfig);
+
+  // === useEmbedding ===
+  const { embed, embedding, loading: embLoading } = useEmbedding(embedder);
+
+  // === Ingest state ===
+  const [ingested, setIngested] = useState(false);
+
+  // === useSimilaritySearch (vector-based) ===
+  const [queryVec, setQueryVec] = useState(null);
+  const { results: vecResults } = useSimilaritySearch(store, queryVec, { k: 3 });
+
+  // === useRetriever (text-based, RAG-style) ===
+  const [queryText, setQueryText] = useState('');
+  const { retrieve, context, loading: retLoading } = useRetriever(store, embedder);
+
+  // Ingest on ready
+  useEffect(() => {
+    if (!ready || ingested || !store) return;
+    (async () => {
+      await store.addTexts(DOCS.map(d => ({ ...d, metadata: { text: d.text } })));
+      setIngested(true);
+    })();
+  }, [ready, store, ingested]);
+
+  // Embed a sample query
+  const sampleQuery = 'gpu parallel processing';
+  useEffect(() => {
+    if (!embedder || embedding) return;
+    embed(sampleQuery);
+  }, [embedder]);
+
+  // Run vector search when embedding is ready
+  useEffect(() => {
+    if (embedding && store && ingested) setQueryVec(embedding);
+  }, [embedding, store, ingested]);
+
+  // Run text retrieval
+  useEffect(() => {
+    if (!ready || !ingested) return;
+    retrieve(sampleQuery, { k: 3 });
+  }, [ready, ingested]);
+
+  return h(Fragment, null,
+    // Status bar
+    h('div', { className: 'card', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+      h('div', null,
+        h('span', { className: 'badge' }, storeErr ? 'error' : ready ? 'ready' : 'connecting…'),
+        ' ',
+        h('span', { className: 'dim' }, `store: ${count} docs, dim ${storeConfig.dimension}`),
+      ),
+      h('div', { className: 'dim', style: { fontSize: '.8rem' } },
+        stats ? `device: ${stats.device} · quant: ${stats.quantBits === 0 ? 'fp32' : `int${stats.quantBits}`}` : '',
+      ),
+    ),
+
+    // Hook implementations (code display)
+    h('div', { className: 'hooks' },
+      // useVectorStore
+      h('div', { className: 'hook-demo' },
+        h('h3', null, 'useVectorStore(config)'),
+        h('pre', null, `// Creates & manages BrowserVec lifecycle
+// Auto-destroys on unmount / config change
+const { store, ready, error,
+  stats, count } = useVectorStore({
+  dimension: 384,
+  metric: 'cosine',
+  embedder,
+});`),
+        h('div', { style: { fontSize: '.8rem' } },
+          ready ? h('span', { className: 'ok' }, '✓ store ready') :
+          storeErr ? h('span', { className: 'bad' }, `✗ ${storeErr}`) :
+          h('span', { className: 'dim' }, '⏳ initializing…'),
+        ),
+      ),
+
+      // useSimilaritySearch
+      h('div', { className: 'hook-demo' },
+        h('h3', null, 'useSimilaritySearch(store, vector, opts)'),
+        h('pre', null, `// Runs query when vector changes
+const { results, loading } =
+  useSimilaritySearch(store,
+    queryVec, { k: 3 });
+return results?.map(h => h.id);`),
+        h('div', null,
+          vecResults
+            ? h('pre', null, vecResults.map((h, i) => `${i + 1}. ${h.id}  (${h.score.toFixed(3)})`).join('\n'))
+            : h('span', { className: 'dim' }, 'no results yet'),
+        ),
+      ),
+
+      // useEmbedding
+      h('div', { className: 'hook-demo' },
+        h('h3', null, 'useEmbedding(embedder)'),
+        h('pre', null, `// Reactive text → vector
+const { embed, embedding,
+  loading } = useEmbedding(
+  hashingEmbedder({ dim: 384 })
+);
+await embed("your text here");`),
+        h('div', null,
+          embedding
+            ? h('span', { className: 'dim' }, `✓ ${embedding.length}-dim vector` + (embLoading ? ' (re-embedding…)' : ''))
+            : h('span', { className: 'dim' }, 'embedding…'),
+        ),
+      ),
+
+      // useRetriever
+      h('div', { className: 'hook-demo' },
+        h('h3', null, 'useRetriever(store, embedder)'),
+        h('pre', null, `// RAG: embed query + search
+const { retrieve, context,
+  loading } = useRetriever(
+  store, embedder
+);
+await retrieve("your question");`),
+        h('div', null,
+          retLoading
+            ? h('span', { className: 'dim' }, '⏳ retrieving…')
+            : context
+              ? h('pre', null, context.map((h, i) => `${i + 1}. ${h.id}  (${h.score.toFixed(3)})`).join('\n'))
+              : h('span', { className: 'dim' }, 'no retrieval yet'),
+        ),
+      ),
+    ),
+
+    // Ingest + query demo
+    h('div', { className: 'card' },
+      h('h2', null, 'Try it'),
+      h('div', { style: { display: 'flex', gap: '.5rem', alignItems: 'center', flexWrap: 'wrap' } },
+        h('input', {
+          placeholder: 'Type a query…',
+          value: queryText,
+          onInput: (e) => setQueryText(e.target.value),
+          style: { flex: 1, margin: 0 },
+        }),
+        h('button', {
+          onClick: () => retrieve(queryText || sampleQuery, { k: 3 }),
+          disabled: !ready || retLoading,
+        }, 'Retrieve'),
+      ),
+      context && h('pre', { style: { marginTop: '.5rem' } },
+        context.map((h, i) =>
+          `${i + 1}. [${h.score.toFixed(3)}] ${h.metadata?.text ?? h.id}`
+        ).join('\n')
+      ),
+    ),
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(h(App));
+</script>
+</body>
+</html>

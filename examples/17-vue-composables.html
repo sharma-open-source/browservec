@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 17. Vue Composables</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 860px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; }
+  .subtitle { color: #666; margin-top: -.5rem; font-size: .9rem; }
+  .card { border: 1px solid #eee; border-radius: 10px; padding: 1rem; margin-bottom: 1rem; }
+  .card h2 { font-size: .9rem; margin: 0 0 .5rem; color: #1a73e8; }
+  .composables { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width:600px) { .composables { grid-template-columns: 1fr; } }
+  .comp-demo { border: 1px solid #ddd; border-radius: 8px; padding: .75rem; background: #fafafa; }
+  .comp-demo h3 { font-size: .8rem; margin: 0 0 .4rem; color: #555; text-transform: uppercase; letter-spacing: .04em; }
+  input, select, textarea { width: 100%; padding: .4rem .5rem; border: 1px solid #ddd; border-radius: 6px; font: inherit; font-size: .85rem; margin-bottom: .4rem; }
+  button { padding: .4rem .8rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font-size: .8rem; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  pre { background: #111; color: #b9f; padding: .5rem .75rem; border-radius: 6px; font-size: .75rem; overflow-x: auto; margin: .25rem 0; white-space: pre-wrap; }
+  .ok { color: #2e7d32; }
+  .bad { color: #c62828; }
+  .dim { color: #888; }
+  .badge { display: inline-block; font-size: .65rem; padding: .15rem .4rem; border-radius: 4px; background: #e8f5e9; color: #2e7d32; }
+  .code { font-size: .78rem; background: #f0f0f0; padding: .1rem .3rem; border-radius: 3px; font-family: monospace; }
+  .src { font-size: .75rem; color: #999; margin-top: .5rem; border-top: 1px solid #eee; padding-top: .5rem; }
+</style>
+</head>
+<body>
+<h1>Vue Composables for BrowserVec</h1>
+<p class="subtitle">Reactive composables: <span class="code">useVectorStore</span> · <span class="code">useSimilaritySearch</span> · <span class="code">useEmbedding</span> · <span class="code">useRetriever</span></p>
+
+<div id="app">
+  <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <span class="badge">{{ storeReady ? 'ready' : storeError ? 'error' : 'connecting…' }}</span>
+      <span class="dim"> store: {{ count }} docs, dim 384</span>
+    </div>
+    <div class="dim" style="font-size:.8rem" v-if="stats">
+      device: {{ stats.device }} · quant: {{ stats.quantBits === 0 ? 'fp32' : 'int' + stats.quantBits }}
+    </div>
+  </div>
+
+  <div class="composables">
+    <div class="comp-demo">
+      <h3>useVectorStore(config)</h3>
+      <pre>// Creates & manages BrowserVec lifecycle
+// Auto-destroys on unmount / config change
+const { store, ready, error,
+  stats, count } = useVectorStore({
+  dimension: 384,
+  metric: 'cosine',
+  embedder,
+});</pre>
+      <div style="font-size:.8rem">
+        <span v-if="storeReady" class="ok">✓ store ready</span>
+        <span v-else-if="storeError" class="bad">✗ {{ storeError }}</span>
+        <span v-else class="dim">⏳ initializing…</span>
+      </div>
+    </div>
+
+    <div class="comp-demo">
+      <h3>useSimilaritySearch(store, vector, opts)</h3>
+      <pre>// Runs query when vector changes
+const { results, loading } =
+  useSimilaritySearch(store,
+    queryVec, { k: 3 });
+results?.map(h => h.id);</pre>
+      <pre v-if="vecResults">{{ vecResults.map((h,i) => (i+1)+'. '+h.id+'  ('+h.score.toFixed(3)+')').join('\n') }}</pre>
+      <span v-else class="dim">no results yet</span>
+    </div>
+
+    <div class="comp-demo">
+      <h3>useEmbedding(embedder)</h3>
+      <pre>// Reactive text → vector
+const { embed, embedding,
+  loading } = useEmbedding(
+  hashingEmbedder({ dim: 384 })
+);
+await embed("your text here");</pre>
+      <div v-if="embedding" class="dim">✓ {{ embedding.length }}-dim vector</div>
+      <span v-else class="dim">embedding…</span>
+    </div>
+
+    <div class="comp-demo">
+      <h3>useRetriever(store, embedder)</h3>
+      <pre>// RAG: embed query + search
+const { retrieve, context,
+  loading } = useRetriever(
+  store, embedder
+);
+await retrieve("your question");</pre>
+      <pre v-if="retContext">{{ retContext.map((h,i) => (i+1)+'. '+h.id+'  ('+h.score.toFixed(3)+')').join('\n') }}</pre>
+      <span v-else class="dim">no retrieval yet</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Try it</h2>
+    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+      <input v-model="queryText" placeholder="Type a query…" style="flex:1;margin:0" />
+      <button @click="doRetrieve" :disabled="!storeReady || retLoading">Retrieve</button>
+    </div>
+    <pre v-if="retContext" style="margin-top:.5rem">{{ retContext.map((h,i) => (i+1)+'. ['+h.score.toFixed(3)+'] '+(h.metadata?.text??h.id)).join('\n') }}</pre>
+  </div>
+
+  <div class="src">
+    <p>This demo uses <strong>Vue 3 via esm.sh</strong> — no build step, runs directly in the browser.
+    The composables below are reusable patterns you can copy into your own Vue project.</p>
+  </div>
+</div>
+
+<script type="module">
+// ---- Vue imports from esm.sh (no build step) ----
+import { createApp, ref, computed, watch, onMounted, onUnmounted, shallowRef } from 'https://esm.sh/vue@3.5.39/dist/vue.esm-browser?target=es2022';
+import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+// ====================================================================
+// Composables
+// ====================================================================
+
+/**
+ * useVectorStore(config)
+ * Creates and manages a BrowserVec instance. Auto-destroys on unmount.
+ * Returns { store, ready, error, stats, count, dim }.
+ */
+function useVectorStore(config) {
+  const store = shallowRef(null);
+  const ready = ref(false);
+  const error = ref(null);
+  const stats = ref(null);
+  const count = ref(0);
+  let instance = null;
+  let timer = null;
+
+  const start = async () => {
+    ready.value = false;
+    error.value = null;
+    store.value = null;
+    if (instance) { instance.destroy(); instance = null; }
+    try {
+      const db = await BrowserVec.create(config);
+      instance = db;
+      store.value = db;
+      stats.value = db.stats();
+      count.value = db.count;
+      ready.value = true;
+      timer = setInterval(() => {
+        if (instance) { stats.value = instance.stats(); count.value = instance.count; }
+      }, 500);
+    } catch (e) {
+      error.value = e.message;
+    }
+  };
+
+  onMounted(start);
+  onUnmounted(() => {
+    if (timer) clearInterval(timer);
+    if (instance) { instance.destroy(); instance = null; }
+  });
+
+  return { store, ready, error, stats, count };
+}
+
+/**
+ * useSimilaritySearch(store, queryVector, opts?)
+ * Runs a query when the vector ref changes.
+ * Returns { results, loading, error, search }.
+ */
+function useSimilaritySearch(storeRef, queryVectorRef, opts = {}) {
+  const results = ref(null);
+  const loading = ref(false);
+  const error = ref(null);
+
+  const search = async (vec, overrides = {}) => {
+    const s = storeRef.value;
+    if (!s) return;
+    loading.value = true;
+    error.value = null;
+    try {
+      const k = overrides.k ?? opts.k ?? 5;
+      const hits = await s.query(vec, { k });
+      results.value = hits;
+      return hits;
+    } catch (e) {
+      error.value = e.message;
+      results.value = null;
+    } finally {
+      loading.value = false;
+    }
+  };
+
+  watch([storeRef, queryVectorRef], ([s, q]) => {
+    if (s && q) search(q);
+  });
+
+  return { results, loading, error, search };
+}
+
+/**
+ * useEmbedding(embedder)
+ * Returns { embed, embedding, loading } for embedding text.
+ */
+function useEmbedding(embedderRef) {
+  const embedding = ref(null);
+  const loading = ref(false);
+
+  const embed = async (text) => {
+    const e = embedderRef.value;
+    if (!e) return null;
+    loading.value = true;
+    try {
+      const [vec] = await e.embed([text]);
+      embedding.value = vec;
+      return vec;
+    } finally {
+      loading.value = false;
+    }
+  };
+
+  return { embed, embedding, loading };
+}
+
+/**
+ * useRetriever(storeRef, embedderRef)
+ * RAG-style: embed a query, search the store, return context.
+ * Returns { retrieve, context, loading, error }.
+ */
+function useRetriever(storeRef, embedderRef) {
+  const context = ref(null);
+  const loading = ref(false);
+  const error = ref(null);
+
+  const retrieve = async (text, opts = {}) => {
+    const s = storeRef.value;
+    const e = embedderRef.value;
+    if (!s || !e) return;
+    loading.value = true;
+    error.value = null;
+    try {
+      const k = opts.k ?? 5;
+      const hits = await s.queryText(text, { k });
+      context.value = hits;
+      return hits;
+    } catch (err) {
+      error.value = err.message;
+      context.value = null;
+    } finally {
+      loading.value = false;
+    }
+  };
+
+  return { retrieve, context, loading, error };
+}
+
+// ====================================================================
+// Vue app
+// ====================================================================
+
+const DOCS = [
+  { id: 'd1', text: 'WebGPU compute shaders run massively parallel kernels on the GPU for high-performance data processing.' },
+  { id: 'd2', text: 'Cosine similarity measures the angle between two vectors, ranging from -1 (opposite) to 1 (identical).' },
+  { id: 'd3', text: 'TurboQuant uses randomized Hadamard rotation followed by scalar quantization to compress vectors to int8 or int4.' },
+  { id: 'd4', text: 'IVF indexing clusters vectors with k-means on the GPU, then scans only the nearest clusters per query.' },
+  { id: 'd5', text: 'The store persists to OPFS or IndexedDB as a versioned binary snapshot with BVEC magic header.' },
+  { id: 'd6', text: 'A GPU kernel processes many threads in parallel on the graphics processor.' },
+  { id: 'd7', text: 'OPFS provides high-performance file access for web applications in the browser.' },
+  { id: 'd8', text: 'Embeddings are dense vector representations that capture semantic meaning of text.' },
+];
+
+const app = createApp({
+  setup() {
+    const embedderInst = hashingEmbedder({ dimension: 384 });
+    const embedder = ref(embedderInst);
+
+    const config = computed(() => ({ dimension: 384, metric: 'cosine', embedder: embedderInst }));
+    const { store, ready: storeReady, error: storeError, stats, count } = useVectorStore(config.value);
+
+    const { embed, embedding } = useEmbedding(embedder);
+    const queryVec = ref(null);
+
+    const { results: vecResults } = useSimilaritySearch(store, queryVec, { k: 3 });
+
+    const queryText = ref('');
+    const { retrieve, context: retContext, loading: retLoading } = useRetriever(store, embedder);
+
+    // Ingest on ready
+    let ingested = false;
+    watch(storeReady, async (v) => {
+      if (v && !ingested) {
+        ingested = true;
+        await store.value.addTexts(DOCS.map(d => ({ ...d, metadata: { text: d.text } })));
+        // Embed sample query
+        const sampleQuery = 'gpu parallel processing';
+        const vec = await embed(sampleQuery);
+        queryVec.value = vec;
+        await retrieve(sampleQuery, { k: 3 });
+      }
+    });
+
+    const doRetrieve = () => {
+      const q = queryText.value || 'gpu parallel processing';
+      retrieve(q, { k: 3 });
+    };
+
+    return {
+      storeReady, storeError, stats, count,
+      vecResults, embedding, retContext, retLoading,
+      queryText, doRetrieve,
+    };
+  },
+});
+
+app.mount('#app');
+</script>
+</body>
+</html>

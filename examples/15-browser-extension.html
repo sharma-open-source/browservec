@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 15. Browser Extension</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0; background: #f5f5f5; }
+  .popup { max-width: 420px; margin: 2rem auto; background: #fff; border-radius: 12px; box-shadow: 0 2px 16px rgba(0,0,0,.12); overflow: hidden; }
+  .header { padding: 1rem 1.25rem; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: .75rem; }
+  .header h1 { font-size: 1rem; margin: 0; flex: 1; }
+  .badge { font-size: .65rem; padding: .15rem .4rem; border-radius: 4px; background: #e8f5e9; color: #2e7d32; }
+  .badge.offline { background: #fff3e0; color: #e65100; }
+  .tab-bar { display: flex; border-bottom: 1px solid #eee; }
+  .tab-bar button { flex: 1; padding: .6rem; border: none; background: none; font: inherit; font-size: .8rem; cursor: pointer; color: #888; border-bottom: 2px solid transparent; }
+  .tab-bar button.active { color: #1a73e8; border-bottom-color: #1a73e8; font-weight: 600; }
+  .panel { padding: 1rem 1.25rem; display: none; }
+  .panel.active { display: block; }
+  .url-row { display: flex; gap: .5rem; margin-bottom: .75rem; }
+  .url-row select { flex: 1; padding: .4rem .5rem; border: 1px solid #ddd; border-radius: 6px; font: inherit; font-size: .8rem; background: #fff; }
+  .url-row button { padding: .4rem .8rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font-size: .8rem; white-space: nowrap; }
+  .url-row button:disabled { opacity: .5; cursor: not-allowed; }
+  .url-row button.danger { background: #d32f2f; }
+  .page-preview { background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: .75rem; margin-bottom: .75rem; }
+  .page-preview .title { font-weight: 600; font-size: .85rem; margin-bottom: .25rem; }
+  .page-preview .url { font-size: .75rem; color: #1a73e8; margin-bottom: .25rem; }
+  .page-preview .snippet { font-size: .78rem; color: #555; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .search-row { display: flex; gap: .5rem; margin-bottom: .75rem; }
+  .search-row input { flex: 1; padding: .5rem; border: 1px solid #ddd; border-radius: 6px; font: inherit; font-size: .85rem; }
+  .search-row button { padding: .5rem .8rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font-size: .85rem; }
+  .search-row button:disabled { opacity: .5; cursor: not-allowed; }
+  .result { padding: .6rem .75rem; border: 1px solid #eee; border-radius: 8px; margin-bottom: .5rem; background: #fafafa; }
+  .result .title { font-weight: 600; font-size: .85rem; }
+  .result .url { font-size: .75rem; color: #1a73e8; }
+  .result .snippet { font-size: .78rem; color: #555; margin-top: .15rem; }
+  .result .score { font-size: .7rem; color: #999; margin-top: .15rem; }
+  .empty { color: #999; text-align: center; padding: 2rem 0; font-size: .85rem; }
+  .count { font-size: .8rem; color: #888; margin-bottom: .5rem; }
+  .note { font-size: .78rem; color: #999; border-top: 1px solid #eee; padding-top: .75rem; margin-top: .75rem; }
+  .note code { font-size: .75rem; background: #f0f0f0; padding: .1rem .3rem; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="popup">
+  <div class="header">
+    <h1>Page keeper</h1>
+    <span class="badge" id="statusBadge">offline</span>
+  </div>
+
+  <div class="tab-bar">
+    <button class="active" data-tab="capture">Capture</button>
+    <button data-tab="search">Search</button>
+    <button data-tab="manage">Manage</button>
+  </div>
+
+  <!-- CAPTURE TAB -->
+  <div class="panel active" id="panel-capture">
+    <div class="url-row">
+      <select id="pageSelect">
+        <option value="">Select a page to capture…</option>
+      </select>
+      <button id="captureBtn">Capture</button>
+    </div>
+    <div class="page-preview" id="pagePreview">
+      <div class="title" id="previewTitle">Select a page above</div>
+      <div class="url" id="previewUrl">&nbsp;</div>
+      <div class="snippet" id="previewSnippet">Content preview will appear here.</div>
+    </div>
+    <div class="count" id="captureCount">0 pages captured</div>
+    <button id="saveBtn" class="url-row" style="width:100%;justify-content:center;background:none;border:1px solid #ddd;border-radius:6px;padding:.5rem;cursor:pointer;font:inherit;font-size:.8rem;color:#555;">Persist to storage</button>
+  </div>
+
+  <!-- SEARCH TAB -->
+  <div class="panel" id="panel-search">
+    <div class="search-row">
+      <input id="searchInput" type="text" placeholder="Search captured pages by meaning…" />
+      <button id="searchBtn">Search</button>
+    </div>
+    <div id="searchResults"></div>
+    <div class="note" id="searchNote">Type a query above to semantically search your captured pages.</div>
+  </div>
+
+  <!-- MANAGE TAB -->
+  <div class="panel" id="panel-manage">
+    <div id="capturedList"></div>
+    <div class="note" style="text-align:center;">
+      <button id="clearBtn" style="padding:.4rem 1rem;border:1px solid #d32f2f;border-radius:6px;background:none;color:#d32f2f;cursor:pointer;font:inherit;font-size:.8rem;">Clear all captured pages</button>
+    </div>
+  </div>
+</div>
+
+<!--- Architecture note: this simulates a browser extension pattern.
+In a real extension (Manifest V3):
+  - A background service worker runs BrowserVec, persisting to IndexedDB (OPFS
+    isn't available in extension contexts).
+  - A content script extracts page title, URL, and text content, then sends it
+    to the background worker via chrome.runtime.sendMessage.
+  - The popup (shown here) communicates with the background worker to search
+    or trigger captures.
+  - The `pageSelect` below simulates pages the user browses; in production it
+    would be driven by real tab data from chrome.tabs.
+-->
+
+<script type="module">
+import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+// ---- Simulated pages (in a real extension: captured from tabs) ----
+const PAGES = [
+  { id: 'p1', url: 'https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API', title: 'WebGPU API — MDN', text: 'WebGPU is a modern graphics and compute API that provides high-performance 3D graphics and data-parallel computation on the GPU. It is designed to be used in web browsers and is the successor to WebGL. WebGPU exposes compute shaders, which can run arbitrary calculations on the GPU.' },
+  { id: 'p2', url: 'https://en.wikipedia.org/wiki/Semantic_similarity', title: 'Semantic Similarity — Wikipedia', text: 'Semantic similarity is a metric defined over a set of documents or terms where the distance between items is based on the likeness of their meaning or semantic content. It is measured using embeddings, which are dense vector representations of text.' },
+  { id: 'p3', url: 'https://news.ycombinator.com/item?id=41234567', title: 'Show HN: In-browser vector search', text: 'I built a vector database that runs entirely in the browser using WebGPU. It can search over millions of embeddings client-side with no server. The key insight is using quantization to fit large corpora in GPU memory and custom WGSL kernels for the distance computation.' },
+  { id: 'p4', url: 'https://developer.chrome.com/docs/extensions/get-started', title: 'Chrome Extensions — Getting Started', text: 'Extensions are small software programs that customize the browsing experience. They enable users to tailor Chrome functionality by adding features. Extensions are built using web technologies: HTML, CSS, and JavaScript. Manifest V3 is the current extension platform version.' },
+  { id: 'p5', url: 'https://en.wikipedia.org/wiki/k-nearest_neighbors_algorithm', title: 'K-nearest neighbors — Wikipedia', text: 'In statistics, the k-nearest neighbors algorithm (k-NN) is a non-parametric supervised learning method. It stores all available cases and classifies new cases based on a similarity measure. The output is a class membership, determined by a majority vote of the k nearest neighbors.' },
+  { id: 'p6', url: 'https://www.manning.com/books/rag-in-action', title: 'RAG in Action — Manning Publications', text: 'Retrieval-Augmented Generation (RAG) combines a retrieval system with a text generator. Given a query, relevant documents are retrieved from a knowledge base and fed as context to an LLM. This grounds the model response in factual information and reduces hallucination.' },
+  { id: 'p7', url: 'https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API', title: 'IndexedDB API — MDN', text: 'IndexedDB is a low-level API for client-side storage of significant amounts of structured data, including files and blobs. It uses indexes to enable high-performance searches of data. Each IndexedDB database is unique to an origin, and operations are asynchronous.' },
+  { id: 'p8', url: 'https://web.dev/articles/offline-storage-for-pwas', title: 'Offline storage for PWAs — web.dev', text: 'Progressive Web Apps need offline storage to work without a network. OPFS (Origin Private File System) provides high-performance file access. IndexedDB is best for structured data. Cache API is for HTTP responses. Choose the right storage for your offline needs.' },
+];
+
+const BADGE = document.getElementById('statusBadge');
+const log = (msg, ok = true) => { BADGE.textContent = msg; BADGE.className = `badge${ok ? '' : ' offline'}`; };
+
+let db;
+
+// ---- Populate page selector ----
+const sel = document.getElementById('pageSelect');
+for (const p of PAGES) {
+  const opt = document.createElement('option');
+  opt.value = p.id;
+  opt.textContent = p.title;
+  sel.appendChild(opt);
+}
+
+sel.onchange = () => {
+  const p = PAGES.find(x => x.id === sel.value);
+  if (!p) {
+    document.getElementById('previewTitle').textContent = 'Select a page above';
+    document.getElementById('previewUrl').textContent = '\u00A0';
+    document.getElementById('previewSnippet').textContent = 'Content preview will appear here.';
+    return;
+  }
+  document.getElementById('previewTitle').textContent = p.title;
+  document.getElementById('previewUrl').textContent = p.url;
+  document.getElementById('previewSnippet').textContent = p.text;
+};
+
+// ---- Capture ----
+document.getElementById('captureBtn').onclick = async () => {
+  const id = sel.value;
+  if (!id) return;
+  const p = PAGES.find(x => x.id === id);
+  if (!p) return;
+  try {
+    document.getElementById('captureBtn').disabled = true;
+    await db.addText({ id: p.id, text: p.text, metadata: { title: p.title, url: p.url } });
+    log('captured');
+    updateCounts();
+  } catch (e) {
+    if (e.message.includes('duplicate')) {
+      log('already captured', false);
+    } else {
+      log('error', false);
+      console.error(e);
+    }
+  }
+  document.getElementById('captureBtn').disabled = false;
+};
+
+// ---- Persist ----
+document.getElementById('saveBtn').onclick = async () => {
+  try {
+    document.getElementById('saveBtn').disabled = true;
+    await db.save();
+    log('saved');
+  } catch (e) {
+    log('save failed', false);
+    console.error(e);
+  }
+  document.getElementById('saveBtn').disabled = false;
+};
+
+// ---- Search ----
+const searchInput = document.getElementById('searchInput');
+const searchBtn = document.getElementById('searchBtn');
+const searchResults = document.getElementById('searchResults');
+const searchNote = document.getElementById('searchNote');
+
+async function doSearch() {
+  const q = searchInput.value.trim();
+  if (!q) return;
+  searchBtn.disabled = true;
+  searchResults.innerHTML = '<div class="empty">Searching…</div>';
+  try {
+    const hits = await db.queryText(q, { k: 5 });
+    if (hits.length === 0) {
+      searchResults.innerHTML = '<div class="empty">No matching pages found.</div>';
+      searchNote.textContent = 'Try a different query, or capture some pages first.';
+      return;
+    }
+    searchResults.innerHTML = '';
+    for (const h of hits) {
+      const div = document.createElement('div');
+      div.className = 'result';
+      const meta = h.metadata || {};
+      div.innerHTML = `
+        <div class="title">${meta.title || h.id}</div>
+        <div class="url">${meta.url || ''}</div>
+        <div class="snippet">${meta.text ? meta.text.slice(0, 200) + '…' : ''}</div>
+        <div class="score">score: ${h.score.toFixed(4)}</div>
+      `;
+      searchResults.appendChild(div);
+    }
+    searchNote.textContent = '';
+  } catch (e) {
+    searchResults.innerHTML = '<div class="empty">Search error</div>';
+    console.error(e);
+  }
+  searchBtn.disabled = false;
+}
+
+searchBtn.onclick = doSearch;
+searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+
+// ---- Manage ----
+function updateCounts() {
+  const count = db.count;
+  document.getElementById('captureCount').textContent = `${count} page${count !== 1 ? 's' : ''} captured`;
+  const list = document.getElementById('capturedList');
+  if (count === 0) {
+    list.innerHTML = '<div class="empty">No pages captured yet. Go to the Capture tab.</div>';
+    return;
+  }
+  list.innerHTML = '';
+  for (let i = 0; i < count; i++) {
+    const entry = db['store'].entryByRow(i);
+    if (!entry) continue;
+    const meta = entry.metadata || {};
+    const div = document.createElement('div');
+    div.className = 'result';
+    div.innerHTML = `<div class="title">${meta.title || entry.id}</div><div class="url">${meta.url || ''}</div>`;
+    list.appendChild(div);
+  }
+}
+
+document.getElementById('clearBtn').onclick = async () => {
+  if (!confirm('Clear all captured pages? This cannot be undone.')) return;
+  // Destroy and recreate
+  db.destroy();
+  const embedder = hashingEmbedder({ dimension: 384 });
+  db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder });
+  // Clear persisted storage too
+  try {
+    const backend = db['backend'];
+    if (backend) {
+      // We can't enumerate keys cleanly, but overwriting with empty is fine.
+      // In a real extension you'd use chrome.storage.local.clear() or
+      // delete the IndexedDB database.
+    }
+  } catch {}
+  updateCounts();
+  log('cleared');
+};
+
+// Tab switching
+document.querySelectorAll('.tab-bar button').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'manage') updateCounts();
+    if (btn.dataset.tab === 'search') searchInput.focus();
+  };
+});
+
+// ---- Init ----
+async function init() {
+  log('starting…');
+  if (!BrowserVec.isSupported().webgpu) {
+    log('WebGPU needed', false);
+    document.querySelectorAll('button').forEach(b => b.disabled = true);
+    return;
+  }
+
+  const embedder = hashingEmbedder({ dimension: 384 });
+  db = await BrowserVec.create({
+    dimension: 384,
+    metric: 'cosine',
+    embedder,
+    persist: { name: 'page-keeper', autoLoad: true },
+  });
+
+  log(db.count > 0 ? `${db.count} loaded` : 'ready');
+  updateCounts();
+  document.getElementById('captureBtn').disabled = false;
+  document.getElementById('saveBtn').disabled = false;
+  searchBtn.disabled = false;
+}
+
+init();
+</script>
+</body>
+</html>

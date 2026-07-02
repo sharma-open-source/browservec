@@ -29,6 +29,8 @@ vector (tombstone + append; upserts if new), and `await db.compact()` physically
 drops tombstones in place — rebuilding the store + index from live vectors only,
 reclaiming GPU memory without a save/reload round-trip.
 
+> **Try it:** [`examples/08-deletion-compaction.html`](../examples/08-deletion-compaction.html)
+
 ## Persistence (M2)
 
 ```ts
@@ -51,6 +53,8 @@ packed Float32 vectors). Vectors are persisted **already normalized** (as
 searched), so a reload reproduces query results exactly. A dimension/metric
 mismatch on load throws rather than silently corrupting results. Byte layout:
 [internals.md#persistence-format](./internals.md#persistence-format-srcpersistformatts).
+
+> **Try it:** [`examples/06-persistence.html`](../examples/06-persistence.html)
 
 ## Encryption at rest (M6)
 
@@ -87,6 +91,8 @@ every time. Requires WebCrypto (`crypto.subtle`), available in browsers and Node
 wrong passphrase, a missing passphrase, and a tampered blob are all rejected.
 Envelope byte layout: [internals.md#encryption-envelope](./internals.md#encryption-envelope-srcpersistcryptots).
 
+> **Try it:** [`examples/07-encryption.html`](../examples/07-encryption.html)
+
 ## Quantization — TurboQuant int8 (M3a)
 
 ```ts
@@ -111,6 +117,8 @@ narrows the corpus to `k·rerankFactor` candidates, then an **exact fp32 re-rank
 preserves dot/cosine exactly — quantization is the only error source. The
 default seed is fixed, so a persisted store re-quantizes identically on reload.
 See [REQUIREMENTS.md §6](../REQUIREMENTS.md) for the TurboQuant background and IP note.
+
+> **Try it:** [`examples/02-quantization.html`](../examples/02-quantization.html)
 
 **Sub-byte (`quantBits: 4`, M3b).** int4 packs 8 coords per word — ~8× less memory
 than fp32 (6× after the 768→1024 pad). With no hardware unpack the kernel extracts
@@ -153,6 +161,8 @@ computes a plain dot product (cosine = dot of unit vectors). `'l2'` returns
 negative squared distance so that **higher score = closer** holds for every
 metric and a single top-k path works.
 
+> **Try it:** [`examples/13-all-metrics.html`](../examples/13-all-metrics.html)
+
 ## Approximate search — IVF (M4)
 
 ```ts
@@ -179,6 +189,8 @@ builds lazily on the first query after an append — a one-time `O(nlist·N)` co
 Real embeddings cluster well, so recall@10 ≥ 0.95 is reachable at a small
 `nprobe`; uniform-random vectors are a worst case (the demo uses clustered data).
 
+> **Try it:** [`examples/03-ivf-index.html`](../examples/03-ivf-index.html)
+
 **IVF × int8 (the 1M path).** Add `quantBits: 8` to an `ann` store and the corpus
 is both clustered *and* int8-quantized — so ~1M×768 fits in a single ~1 GB buffer
 *and* each query scans only the probed lists:
@@ -200,6 +212,8 @@ then the usual exact fp32 re-rank recovers recall. Works at **`quantBits: 8` (4�
 and re-rank does the heavy lifting (validated: raw ~0.86 → re-rank ~1.0); at 1-bit
 it's ~128 B/row, so 1M×768 fits in well under 200 MB and the binary scan+rerank
 tracks the exact scan of the probed set to within ~0.005 recall.
+
+> **Try it:** [`examples/04-ivf-quant-combo.html`](../examples/04-ivf-quant-combo.html)
 
 ## Text retrieval — on-device embedder (M5)
 
@@ -236,6 +250,8 @@ const db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder 
 
 The model weights download once and are cached by the browser, so later sessions
 run offline. Any object with `{ dimension, embed(texts) }` works as an embedder.
+
+> **Try it:** [`examples/05-text-retrieval.html`](../examples/05-text-retrieval.html) · [`examples/11-custom-embedder.html`](../examples/11-custom-embedder.html) · [`examples/12-transformers-embedder.html`](../examples/12-transformers-embedder.html)
 
 ## Worker ingest offload (NFR-8)
 
@@ -274,6 +290,8 @@ ran (a Node check asserts the fresh-array trainer contract matches the old in-pl
 loop exactly). The **Worker ingest** button now also builds an IVF index under a
 heartbeat to show the build stays interactive. Implementation notes:
 [internals.md#worker-offload-seam](./internals.md#worker-offload-seam-srcquantencoderts-srcindexkmeanstrainerts).
+
+> **Try it:** [`examples/09-worker-ingest.html`](../examples/09-worker-ingest.html)
 
 ## Corpus chunking (NFR-10)
 
@@ -316,6 +334,8 @@ button forces a small chunk size and verifies fp32, int8, fp32×IVF, and int8×I
 match their single-buffer references exactly. Every query path now scales past one
 GPU buffer.
 
+> **Try it:** [`examples/10-chunking.html`](../examples/10-chunking.html)
+
 ## GPU top-k (§14.2 lever 3)
 
 The distance kernel leaves one score per row in a dense buffer. Reading *all* of
@@ -328,6 +348,8 @@ query. Past `GPU_TOPK_MIN_ROWS` (4096) the flat index reduces on the GPU instead
 const db = await BrowserVec.create({ dimension: 768, metric: 'cosine' });
 await db.addBatch(millionRecords);
 await db.query(q, { k: 10 }); // top-k reduced on-GPU; only a short list read back
+
+> **Try it:** [`examples/01-basic-flat.html`](../examples/01-basic-flat.html) (the GPU top-k path is exercised automatically at 50k+ rows)
 ```
 
 One workgroup owns a contiguous 256-score segment and extracts its local top-k by
@@ -391,3 +413,5 @@ GPU-throughput optimizations that add nothing to an exact CPU scan, so requestin
 them without a GPU is a clear error rather than a silent accuracy change. The demo's
 **CPU fallback** button flips an internal force-CPU seam to run the fallback in a
 WebGPU browser and verifies it returns the same neighbors as the GPU on identical data.
+
+> **Try it:** the demo's **CPU fallback** button (exercises the internal `__BROWSERVEC_FORCE_CPU__` seam)
