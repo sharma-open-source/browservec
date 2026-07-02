@@ -13,11 +13,13 @@ client-side, no server round-trip.
 
 ## Status
 
-M1–M5 complete, M6 mostly complete (encryption, CPU/WASM fallback done;
-cross-device tuning in progress). In short: flat brute-force + IVF approximate
-search, fp32/int8/int4/1-bit quantization (and every combination of the two),
-OPFS/IndexedDB persistence with optional AES-256-GCM encryption, an on-device
-text embedder, Worker-offloaded ingest, and a WASM-SIMD CPU fallback for
+M1–M5 and M7 complete, M6 mostly complete (encryption, CPU/WASM fallback done;
+cross-device tuning in progress). In short: flat brute-force + two ANN families —
+IVF clustering and an HNSW graph index (with an optional GPU beam-search kernel
+and batched queries) — fp32/int8/int4/1-bit quantization (and every IVF×quant
+combination), OPFS/IndexedDB persistence (HNSW graphs persist too, so loads skip
+the rebuild) with optional AES-256-GCM encryption, an on-device text embedder,
+Worker-offloaded ingest and index builds, and a WASM-SIMD CPU fallback for
 devices without WebGPU. See [CHANGELOG.md](./CHANGELOG.md) for the release
 history and [Not yet here](#not-yet-here) below for open milestone work.
 
@@ -32,8 +34,9 @@ import { BrowserVec } from 'browservec';
 ```
 
 Requires a browser with [WebGPU](https://caniuse.com/webgpu) for the GPU-accelerated
-path; falls back to a WASM-SIMD/scalar CPU path (exact fp32 flat search) where WebGPU
-is unavailable — see [CPU fallback](./docs/features.md#cpu-fallback--no-webgpu-nfr-7--m6).
+path; falls back to a WASM-SIMD/scalar CPU path (exact fp32 flat search, plus the
+HNSW graph index) where WebGPU is unavailable — see
+[CPU fallback](./docs/features.md#cpu-fallback--no-webgpu-nfr-7--m6).
 
 ## Quick start
 
@@ -63,6 +66,9 @@ await db.addBatch([
 const hits = await db.query(queryVec, { k: 5 });
 // → [{ id, score, metadata? }, ...]  (higher score = closer)
 
+const batches = await db.queryBatch([q1, q2, q3], { k: 5 });
+// → QueryResult[][] — one GPU dispatch on an HNSW store with search: 'gpu'
+
 db.get('a');     // → { id, vector, metadata? } | null
 db.delete('a');  // tombstone by id → true/false (compacted on save)
 await db.update({ id: 'a', vector: v2 }); // replace/upsert a vector
@@ -84,6 +90,8 @@ Each links to a short guide with runnable code:
 | [Encryption at rest](./docs/features.md#encryption-at-rest-m6) | AES-256-GCM + PBKDF2 passphrase envelope for persisted/exported snapshots. |
 | [Quantization (TurboQuant)](./docs/features.md#quantization--turboquant-int8-m3a) | int8/int4/1-bit codes via randomized Hadamard rotation + exact fp32 re-rank — ~4×/8×/32× less memory. |
 | [Approximate search (IVF)](./docs/features.md#approximate-search--ivf-m4) | GPU-assisted k-means clustering; queries scan only the nearest `nprobe` clusters. Combines with quantization for the ~1M-row path. |
+| [Graph search (HNSW)](./docs/features.md#graph-search--hnsw-m7) | Layered proximity graph with O(log N) beam search — incremental inserts (no rebuild), all metrics, works without WebGPU. Graph persists in snapshots, so loads skip the rebuild (~180×). |
+| [GPU graph search](./docs/features.md#gpu-graph-search-m7b) | CAGRA-style WGSL kernel: the whole beam search in one dispatch, one workgroup per query — `queryBatch()` searches many queries concurrently (~4× the CPU walk at 60k×768×128). |
 | [Text retrieval / embedder](./docs/features.md#text-retrieval--on-device-embedder-m5) | `addText`/`queryText` via a zero-dep hashing embedder or an optional real semantic model (transformers.js). |
 | [Worker ingest offload](./docs/features.md#worker-ingest-offload-nfr-8) | Rotate+quantize and IVF k-means mean-updates run off the main thread so ingest doesn't freeze the UI. |
 | [Corpus chunking](./docs/features.md#corpus-chunking-nfr-10) | Corpus spreads across multiple GPU buffers once it would exceed the device's per-buffer limit — transparent, same results. |
@@ -137,9 +145,10 @@ browsers are WebKit under the hood, so WebGPU isn't exposed), no OPFS
   (§NFR-10) triggers off the device's actual reported limit, so this needs no
   configuration — but where the chunking crossover happens is device-dependent.
 - **iOS is CPU-fallback-only today**: no WebGPU means quantization/IVF are
-  unavailable and only exact fp32-flat search runs, over IndexedDB persistence
-  (no OPFS on iOS). Pass `fallback: 'wasm'` explicitly when targeting iOS Chrome
-  or Safari, or `BrowserVec.create()` will throw.
+  unavailable; exact fp32-flat search and the HNSW graph index (M7 — CPU-native,
+  so it works here) run over IndexedDB persistence (no OPFS on iOS). Pass
+  `fallback: 'wasm'` explicitly when targeting iOS Chrome or Safari, or
+  `BrowserVec.create()` will throw.
 
 Still missing from the matrix: Android Chrome (has WebGPU — a real gap),
 Windows + NVIDIA/AMD (likely a much smaller buffer-size cap, which would
@@ -159,7 +168,11 @@ device-report JSON block from any of these are welcome — see
   paste-back JSON block per device, feeding the [Benchmarks](#benchmarks)
   table above.
 
-Everything else (M1–M5, plus M6's other pieces) is done — see
+- **HNSW × quantization** — the graph index is fp32-only for now; combining it
+  with the TurboQuant codes (quantized distances inside the traversal) is
+  future work. IVF×quant remains the memory-constrained ~1M path.
+
+Everything else (M1–M5, M7 graph search, plus M6's other pieces) is done — see
 [CHANGELOG.md](./CHANGELOG.md) for what shipped in each release.
 
 ## Docs & further reading

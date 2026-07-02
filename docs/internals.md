@@ -39,24 +39,40 @@ format, or the Worker-offload seams. For the high-level flow, read
 
 ## Persistence format (`src/persist/format.ts`)
 
-Magic `0x43455642` ("BVEC" LE), `FORMAT_VERSION = 1`, `HEADER_BYTES = 32`.
+Magic `0x43455642` ("BVEC" LE), `FORMAT_VERSION = 2`, `HEADER_BYTES = 32`.
 
 | Offset | Field |
 |---|---|
 | `0..4` | magic |
-| `4..8` | version |
+| `4..8` | version (`1`, or `2` when a graph section is present) |
 | `8..12` | dimension |
 | `12..16` | metric code (`0`=cosine, `1`=dot, `2`=l2) |
 | `16..20` | flags (bit 0 = normalize) |
 | `20..24` | count |
 | `24..28` | metadata JSON byte length |
-| `28..32` | reserved (0) |
+| `28..32` | v1: reserved (0). v2: byte offset of the HNSW graph section (0 = none) |
 | `32..` | metadata JSON (`Array<{id, metadata?}>`, row order), 4-byte padded |
 | after that | row-major `Float32Array` vectors (`count * dim * 4` bytes) |
 
-`serialize()` builds this; `deserialize()` validates magic/version/count
-consistency and truncation, and returns a `Snapshot`. The vector region is
-`.slice()`d out on read so it doesn't pin the whole input buffer in memory.
+**v2 graph section (M7c)** — starts 4-aligned right after the vectors, and holds
+the HNSW graph so loads restore it instead of rebuilding:
+
+| Field | Size |
+|---|---|
+| header: magic `"HNSW"` (`0x57534e48`), graph version (=1), `M`, `entry`, `top` (maxLevel), `upperLen`, 2× reserved | 8 × u32 |
+| `levels` — per-node top layer | i32 × count |
+| `links0` — layer-0 adjacency, count-prefixed `(2M+1)`-wide blocks | i32 × count·(2M+1) |
+| `upper` — upper-layer blocks, concatenated in row order (node *n* owns `levels[n]·(M+1)`) | i32 × upperLen |
+
+`serialize()` writes **v1 whenever there is no graph** (flat/IVF/quant stores),
+so older builds keep reading every snapshot they could before — only the new
+feature pays the version bump; `deserialize()` reads 1..2. The graph is skipped
+at write time when tombstones are pending (compaction renumbers rows), and
+ignored at read time on any config mismatch — both fall back to the ordinary
+rebuild-via-append load path. `deserialize()` validates magic/version/count
+consistency and truncation, and returns a `Snapshot`. The vector and graph
+regions are `.slice()`d out on read so they don't pin the whole input buffer
+in memory.
 
 ## Encryption envelope (`src/persist/crypto.ts`)
 

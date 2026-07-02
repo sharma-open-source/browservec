@@ -12,6 +12,8 @@ BrowserVec (src/index.ts)          orchestration: config → device/index select
   │     ├── QuantIndex               fp32 → int8/int4/1-bit      (src/index/quant.ts)
   │     ├── IVFIndex                 fp32 clustered              (src/index/ivf.ts)
   │     ├── IVFQuantIndex            clustered + quantized       (src/index/ivfquant.ts)
+  │     ├── HNSWIndex                graph ANN, CPU/Worker-built (src/index/hnsw.ts)
+  │     │     └── HNSWGpuSearcher    optional GPU beam search    (src/index/hnswGpu.ts)
   │     └── CpuIndex                 WASM-SIMD/scalar fallback   (src/fallback/cpu.ts)
   └── PersistenceBackend           OPFS / IndexedDB               (src/persist/*)
 ```
@@ -55,13 +57,17 @@ export interface VectorIndex {
 |---|---|---|---|
 | GPU | no | `0` | `FlatIndex` |
 | GPU | no | `1\|4\|8` | `QuantIndex` |
-| GPU | yes | `0` | `IVFIndex` |
-| GPU | yes | `1\|4\|8` | `IVFQuantIndex` |
-| `null` (CPU fallback) | — | `0` | `CpuIndex` |
-| `null` (CPU fallback) | any | `1\|4\|8` or `ann` set | throws — CPU fallback is fp32-flat only |
+| GPU | `type: 'ivf'` (or omitted `type`) | `0` | `IVFIndex` |
+| GPU | `type: 'ivf'` (or omitted `type`) | `1\|4\|8` | `IVFQuantIndex` |
+| GPU | `type: 'hnsw'` | `0` | `HNSWIndex` (CPU/Worker graph; + `HNSWGpuSearcher` when `search: 'gpu'`) |
+| any | `type: 'hnsw'` | `1\|4\|8` | throws — HNSW × quant is future work |
+| `null` (CPU fallback) | no | `0` | `CpuIndex` |
+| `null` (CPU fallback) | `type: 'hnsw'` | `0` | `HNSWIndex` — the graph index is CPU-native, so it needs no GPU |
+| `null` (CPU fallback) | IVF, or `1\|4\|8` | — | throws — quant/IVF are GPU-throughput features |
 
-`l2` metric is rejected for `ann` and quantized modes at this same point
-(cosine/dot only) — it's a validation error, not a silent fallback to flat.
+`l2` metric is rejected for IVF and quantized modes at this same point
+(cosine/dot only; flat and HNSW accept all three metrics) — it's a validation
+error, not a silent fallback to flat.
 
 ## Ingest path
 
@@ -122,7 +128,11 @@ only way to reclaim GPU memory without a save/reload round-trip.
 `PersistenceBackend` (`src/persist/backend.ts`) selected by
 `{ backend: 'opfs' | 'indexeddb' | 'auto' }`. Loading is the same pipeline in
 reverse: decrypt-if-needed → deserialize → `Store.insert()` each row in order
-→ one `index.append()` of the whole snapshot. See
+→ one `index.append()` of the whole snapshot. HNSW stores embed their graph in
+the snapshot (format v2, M7c); when the loaded config matches (`type: 'hnsw'`,
+same `M`), load calls `index.loadWithGraph()` instead of `append()`, restoring
+the graph directly and skipping the O(N·efConstruction) rebuild — any mismatch,
+or a snapshot taken with pending tombstones, falls back to the append path. See
 [internals.md](./internals.md#persistence-format) for the byte layout.
 
 ## CPU / WASM fallback
@@ -137,14 +147,16 @@ details.
 
 ## Worker offload
 
-Two CPU-heavy operations can run on a Worker instead of the main thread —
+Three CPU-heavy operations can run on a Worker instead of the main thread —
 quantized ingest (rotate+quantize, `src/quant/encoder.ts` +
-`src/quant/quantize.worker.ts`) and IVF k-means centroid mean-updates
-(`src/index/kmeansTrainer.ts` + `src/index/kmeans.worker.ts`). Both follow the
-same seam pattern: try to spin up a Worker, transparently fall back to running
-in-thread if Workers aren't available, and report which path ran via
-`Stats.ingest` / `Stats.train`. See
-[internals.md](./internals.md#worker-offload-seam).
+`src/quant/quantize.worker.ts`), IVF k-means centroid mean-updates
+(`src/index/kmeansTrainer.ts` + `src/index/kmeans.worker.ts`), and the HNSW
+graph (`src/index/hnsw.ts` + `src/index/hnsw.worker.ts` — here the Worker *owns*
+the graph and corpus copy: appends stream in, only top-k results cross back, so
+build **and** CPU search stay off the main thread). All follow the same seam
+pattern: try to spin up a Worker, transparently fall back to running in-thread
+if Workers aren't available, and report which path ran via `Stats.ingest` /
+`Stats.train`. See [internals.md](./internals.md#worker-offload-seam).
 
 ## How it maps to the design
 
@@ -185,3 +197,8 @@ implements it.
 | [src/quant/encode.ts](../src/quant/encode.ts) | §NFR-8 — shared BatchEncoder (rotate+quantize), one impl for both threads |
 | [src/quant/quantize.worker.ts](../src/quant/quantize.worker.ts) | §NFR-8 — ingest Worker; inlined into the bundle via `?worker&inline` |
 | [src/quant/encoder.ts](../src/quant/encoder.ts) | §NFR-8 — encoder seam: Worker offload + in-thread fallback |
+| [src/index/hnswGraph.ts](../src/index/hnswGraph.ts) | M7 (post-spec) — HNSW graph core: typed-array adjacency, beam search, diversity heuristic, serialize/load |
+| [src/index/hnsw.worker.ts](../src/index/hnsw.worker.ts) | M7 / §NFR-8 — graph Worker (owns graph + corpus copy; build and CPU search off-thread) |
+| [src/index/hnsw.ts](../src/index/hnsw.ts) | M7 — HNSWIndex seam: Worker/in-thread/GPU dispatch, batch queries, graph persistence hooks |
+| [src/engine/wgsl/graphSearch.ts](../src/engine/wgsl/graphSearch.ts) | M7b — CAGRA-style beam-search kernel: whole search in one dispatch, one workgroup per query |
+| [src/index/hnswGpu.ts](../src/index/hnswGpu.ts) | M7b — GPU graph executor: corpus/adjacency mirrors, batched dispatch, readback dedup |
