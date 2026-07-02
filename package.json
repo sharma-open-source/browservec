@@ -51,6 +51,7 @@
     "wgsl"
   ],
   "devDependencies": {
+    "@orama/orama": "^3.1.18",
     "@webgpu/types": "^0.1.40",
     "@xenova/transformers": "^2.17.2",
     "hnswlib-wasm": "^0.8.2",

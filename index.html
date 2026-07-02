@@ -1,11 +1,244 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta http-equiv="refresh" content="0; url=./demo/" />
-    <title>BrowserVec</title>
-  </head>
-  <body>
-    <p>Redirecting to the <a href="./demo/">BrowserVec demo</a>…</p>
-  </body>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — in-browser WebGPU vector store</title>
+<meta name="description" content="In-browser WebGPU vector store with custom WGSL kernels, for fast offline / in-session retrieval — embeddings, similarity search, and persistence, all client-side, no server round-trip." />
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    margin: 0; color: #1a1a1a; background: #fff;
+  }
+  header {
+    padding: 4rem 1.5rem 3rem; text-align: center;
+    background: linear-gradient(180deg, #f7f9fc 0%, #fff 100%);
+    border-bottom: 1px solid #e8e8e8;
+  }
+  header h1 { font-size: 2.4rem; margin: 0 0 .5rem; letter-spacing: -0.02em; }
+  header p.tagline { font-size: 1.15rem; color: #555; max-width: 640px; margin: 0 auto 1.5rem; }
+  .badges { margin-bottom: 1.5rem; }
+  .badges img { margin: 0 .25rem; vertical-align: middle; }
+  .cta { display: flex; gap: .75rem; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: .7rem 1.4rem; border-radius: 8px; text-decoration: none;
+    font-weight: 600; font-size: .95rem; transition: transform .1s ease;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn.primary { background: #1a73e8; color: #fff; }
+  .btn.secondary { background: #fff; color: #1a1a1a; border: 1px solid #d5d5d5; }
+  .btn.ghost { background: #f5f5f5; color: #1a1a1a; }
+  main { max-width: 900px; margin: 0 auto; padding: 3rem 1.5rem; }
+  section { margin-bottom: 3rem; }
+  h2 { font-size: 1.5rem; margin-bottom: .25rem; }
+  h2 .num { color: #aaa; font-weight: 400; margin-right: .4rem; }
+  section > p.lead { color: #555; margin-top: 0; }
+  pre {
+    background: #0d1117; color: #c9d1d9; padding: 1rem 1.25rem; border-radius: 8px;
+    overflow-x: auto; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  :not(pre) > code { background: #f0f2f5; padding: .1rem .35rem; border-radius: 4px; font-size: .9em; }
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th, td { text-align: left; padding: .55rem .6rem; border-bottom: 1px solid #eee; }
+  th { color: #888; font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
+  .card {
+    border: 1px solid #e5e5e5; border-radius: 10px; padding: 1.1rem 1.25rem; background: #fafbfc;
+  }
+  .card h3 { margin: 0 0 .35rem; font-size: 1rem; }
+  .card p { margin: 0; color: #555; font-size: .9rem; }
+  .status-line { display: flex; align-items: center; gap: .5rem; padding: .9rem 1.1rem; background: #eef7ee; border: 1px solid #cfe8cf; border-radius: 8px; color: #2e5c2e; font-size: .92rem; }
+  .status-line strong { color: #1e4620; }
+  footer { text-align: center; padding: 2.5rem 1.5rem 3.5rem; color: #888; font-size: .88rem; border-top: 1px solid #eee; }
+  footer a { color: #555; }
+  a.plain { color: #1a73e8; text-decoration: none; }
+  a.plain:hover { text-decoration: underline; }
+  nav.toc { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; font-size: .88rem; margin-top: 1rem; }
+  nav.toc a { color: #666; text-decoration: none; }
+  nav.toc a:hover { color: #1a73e8; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>BrowserVec</h1>
+  <p class="tagline">
+    In-browser WebGPU vector store with custom WGSL kernels — embeddings,
+    similarity search, and persistence, all client-side, no server round-trip.
+  </p>
+  <div class="badges">
+    <img alt="npm" src="https://img.shields.io/npm/v/browservec" />
+    <img alt="license" src="https://img.shields.io/npm/l/browservec" />
+  </div>
+  <div class="cta">
+    <a class="btn primary" href="demo/">Try the demo</a>
+    <a class="btn secondary" href="examples/">Browse examples</a>
+    <a class="btn ghost" href="https://github.com/sharma-open-source/browservec">GitHub</a>
+  </div>
+  <nav class="toc">
+    <a href="#status">Status</a>
+    <a href="#install">Install</a>
+    <a href="#quick-start">Quick start</a>
+    <a href="#core-api">Core API</a>
+    <a href="#features">Features</a>
+    <a href="#benchmarks">Benchmarks</a>
+    <a href="#docs">Docs</a>
+  </nav>
+</header>
+
+<main>
+
+  <section id="status">
+    <h2><span class="num">01</span>Status</h2>
+    <div class="status-line">
+      <strong>M1–M5 complete, M6 mostly complete.</strong>
+      &nbsp;Flat brute-force + IVF approximate search, fp32/int8/int4/1-bit
+      quantization (every combination), OPFS/IndexedDB persistence with
+      optional AES-256-GCM encryption, an on-device text embedder,
+      Worker-offloaded ingest, and a WASM-SIMD CPU fallback for devices
+      without WebGPU. Cross-device tuning is the one open item.
+    </div>
+    <p class="lead" style="margin-top:1rem;">
+      See <a class="plain" href="https://github.com/sharma-open-source/browservec/blob/main/CHANGELOG.md">CHANGELOG.md</a>
+      for release history.
+    </p>
+  </section>
+
+  <section id="install">
+    <h2><span class="num">02</span>Install</h2>
+    <pre><code>npm install browservec</code></pre>
+    <pre><code>import { BrowserVec } from 'browservec';</code></pre>
+    <p class="lead">
+      Requires a browser with <a class="plain" href="https://caniuse.com/webgpu">WebGPU</a>
+      for the GPU-accelerated path; falls back to a WASM-SIMD/scalar CPU path
+      (exact fp32 flat search) where WebGPU is unavailable.
+    </p>
+  </section>
+
+  <section id="quick-start">
+    <h2><span class="num">03</span>Quick start</h2>
+    <pre><code>npm install
+npm run dev        # open the printed URL → demo/index.html (needs a WebGPU browser)</code></pre>
+    <p class="lead">
+      Or skip the local setup entirely — <a class="plain" href="demo/">open the hosted demo</a>.
+      It builds a random corpus, runs a GPU top-k query, and checks recall
+      against a CPU brute-force reference.
+    </p>
+  </section>
+
+  <section id="core-api">
+    <h2><span class="num">04</span>Core API</h2>
+    <pre><code>import { BrowserVec } from 'browservec';
+
+BrowserVec.isSupported(); // { webgpu, opfs, wasm }
+
+const db = await BrowserVec.create({ dimension: 768, metric: 'cosine' });
+
+await db.addBatch([
+  { id: 'a', vector: vecA, metadata: { lang: 'en' } },
+  { id: 'b', vector: vecB },
+]);
+
+const hits = await db.query(queryVec, { k: 5 });
+// → [{ id, score, metadata? }, ...]  (higher score = closer)
+
+db.get('a');     // → { id, vector, metadata? } | null
+db.delete('a');  // tombstone by id → true/false (compacted on save)
+await db.update({ id: 'a', vector: v2 }); // replace/upsert a vector
+await db.compact();                       // physically drop tombstones (no reload)
+db.stats();      // { count, deleted?, dimension, metric, device, lastQueryMs, persist? }
+db.destroy();    // free GPU resources</code></pre>
+    <p class="lead">
+      Full method/type reference:
+      <a class="plain" href="https://github.com/sharma-open-source/browservec/blob/main/docs/api-reference.md">docs/api-reference.md</a>.
+    </p>
+  </section>
+
+  <section id="features">
+    <h2><span class="num">05</span>Features</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td>Deleting vectors</td><td>Tombstone-based delete/update/compact — cheap deletes, GPU memory reclaimed on compact or reload.</td></tr>
+        <tr><td>Persistence</td><td>Versioned binary snapshots to OPFS (or IndexedDB), auto-load on <code>create()</code>, export/import as a Blob.</td></tr>
+        <tr><td>Encryption at rest</td><td>AES-256-GCM + PBKDF2 passphrase envelope for persisted/exported snapshots.</td></tr>
+        <tr><td>Quantization (TurboQuant)</td><td>int8/int4/1-bit codes via randomized Hadamard rotation + exact fp32 re-rank — ~4×/8×/32× less memory.</td></tr>
+        <tr><td>Approximate search (IVF)</td><td>GPU-assisted k-means clustering; queries scan only the nearest <code>nprobe</code> clusters.</td></tr>
+        <tr><td>Text retrieval / embedder</td><td><code>addText</code>/<code>queryText</code> via a zero-dep hashing embedder or an optional transformers.js model.</td></tr>
+        <tr><td>Worker ingest offload</td><td>Rotate+quantize and IVF k-means mean-updates run off the main thread so ingest doesn't freeze the UI.</td></tr>
+        <tr><td>Corpus chunking</td><td>Corpus spreads across multiple GPU buffers past the device's per-buffer limit — transparent, same results.</td></tr>
+        <tr><td>GPU top-k</td><td>Top-k reduction runs on the GPU past 4k rows, so only a short candidate list is read back per query.</td></tr>
+        <tr><td>CPU fallback</td><td>Exact WASM-SIMD flat scan when WebGPU is unavailable — bit-identical to the GPU path.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="benchmarks">
+    <h2><span class="num">06</span>Benchmarks</h2>
+    <p class="lead">
+      From the demo's <strong>M6 device report</strong> tool (fixed-seed 20k×384
+      corpus, recall@10 against an exact fp32 reference). Chrome 149 / macOS,
+      Apple M-series (Metal-3).
+    </p>
+    <table>
+      <thead><tr><th>Config</th><th>recall@10</th><th>Query latency</th></tr></thead>
+      <tbody>
+        <tr><td>flat fp32</td><td>1.000</td><td>1.71 ms/q</td></tr>
+        <tr><td>flat int8</td><td>1.000</td><td>1.52 ms/q</td></tr>
+        <tr><td>flat int4</td><td>1.000</td><td>1.69 ms/q</td></tr>
+        <tr><td>flat 1-bit</td><td>1.000</td><td>2.45 ms/q</td></tr>
+        <tr><td>IVF fp32</td><td>1.000</td><td>0.51 ms/q</td></tr>
+        <tr><td>IVF int8</td><td>1.000</td><td>0.63 ms/q</td></tr>
+        <tr><td>IVF int4</td><td>1.000</td><td>0.93 ms/q</td></tr>
+        <tr><td>IVF 1-bit</td><td>1.000</td><td>1.11 ms/q</td></tr>
+        <tr><td>CPU fallback (WASM-SIMD), 8k rows</td><td>—</td><td>1.76 ms/q</td></tr>
+      </tbody>
+    </table>
+    <p class="lead">
+      Run the tool yourself in the <a class="plain" href="demo/">demo</a> or the
+      interactive <a class="plain" href="examples/perf-benchmark.html">perf-benchmark example</a>.
+      Full matrix, takeaways, and methodology in the
+      <a class="plain" href="https://github.com/sharma-open-source/browservec#benchmarks">README</a>.
+    </p>
+  </section>
+
+  <section id="explore">
+    <h2><span class="num">07</span>Explore</h2>
+    <div class="grid">
+      <div class="card">
+        <h3><a class="plain" href="demo/">Live demo</a></h3>
+        <p>Interactive M1–M6 benchmark runner — flat/IVF search, quantization, persistence, encryption, and the M6 device report tool, all in one page.</p>
+      </div>
+      <div class="card">
+        <h3><a class="plain" href="examples/">Examples gallery</a></h3>
+        <p>26 runnable examples — real-world use cases (RAG chat, knowledge base, recommenders), core concepts, embeddings, persistence, and performance benchmarks.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="docs">
+    <h2><span class="num">08</span>Docs &amp; further reading</h2>
+    <ul>
+      <li><a class="plain" href="https://github.com/sharma-open-source/browservec/tree/main/docs">docs/</a> — architecture overview, full API reference, per-subsystem internals.</li>
+      <li><a class="plain" href="https://github.com/sharma-open-source/browservec/blob/main/docs/architecture.md">docs/architecture.md</a> — file↔spec mapping table.</li>
+      <li><a class="plain" href="https://github.com/sharma-open-source/browservec/blob/main/REQUIREMENTS.md">REQUIREMENTS.md</a> — the original design spec.</li>
+      <li><a class="plain" href="https://github.com/sharma-open-source/browservec/blob/main/CHANGELOG.md">CHANGELOG.md</a> — release history.</li>
+    </ul>
+  </section>
+
+</main>
+
+<footer>
+  <p>
+    <a href="https://github.com/sharma-open-source/browservec">GitHub</a> ·
+    <a href="https://www.npmjs.com/package/browservec">npm</a> ·
+    <a href="https://github.com/sharma-open-source/browservec/blob/main/LICENSE">MIT License</a>
+    © Sharma SK
+  </p>
+</footer>
+
+</body>
 </html>

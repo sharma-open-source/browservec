@@ -413,6 +413,15 @@ export function standardEngines(dim, n, { efConstruction, m, efSearch }, log = (
   return engines;
 }
 
+/** BrowserVec-only engine list (flat + int8 + 1-bit) — no third-party comparisons. */
+export function browserVecEngines(dim) {
+  return [
+    makeBrowserVecEngine(dim),
+    makeBrowserVecQuantEngine(dim, 8),
+    makeBrowserVecQuantEngine(dim, 1),
+  ];
+}
+
 // ---- Rendering ----
 
 export function fmtBytes(b) {

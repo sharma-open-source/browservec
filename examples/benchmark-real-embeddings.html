@@ -53,18 +53,18 @@
 </head>
 <body>
 <h1>Real-Embeddings Benchmark</h1>
-<p class="subtitle">Same engines as the <a href="benchmark-dashboard.html">synthetic dashboard</a> — BrowserVec (flat + quantized),
-hnswlib-wasm, voy-search, Orama, Vectorious — but the vectors are real sentence embeddings from a real
+<p class="subtitle">BrowserVec only — flat fp32, int8 + rerank, and 1-bit + rerank — over real sentence embeddings from a real
 transformer model, computed in-browser over a hand-written corpus of 180 factual documents across 12 topics.</p>
 
 <div class="note">
-  Synthetic clustered vectors (the other dashboard) are useful for raw throughput comparisons, but they have
-  no real semantic structure — every cluster is equally separable, which flatters approximate methods.
-  Real embeddings have uneven density, near-duplicate topics, and genuine ambiguity, which is what actually
-  stresses recall. The quantitative metrics below (latency, recall, memory, CPU/GPU/transfer) use the exact
-  same harness as the synthetic dashboard — only the vector source differs. A qualitative section at the
-  bottom runs hand-written natural-language queries through BrowserVec and shows the retrieved document text,
-  so you can eyeball whether the matches actually make sense.
+  Synthetic clustered vectors (the <a href="benchmark-dashboard.html">dashboard benchmark</a>, which also
+  compares against hnswlib-wasm, voy-search, Orama, and Vectorious) are useful for raw throughput comparisons,
+  but they have no real semantic structure — every cluster is equally separable, which flatters approximate
+  methods. Real embeddings have uneven density, near-duplicate topics, and genuine ambiguity, which is what
+  actually stresses recall. The quantitative metrics below (latency, recall, memory, CPU/GPU/transfer) use the
+  same harness as the synthetic dashboard — only the vector source and engine set differ. A qualitative section
+  at the bottom runs hand-written natural-language queries through BrowserVec and shows the retrieved document
+  text, so you can eyeball whether the matches actually make sense.
 </div>
 
 <h2>1. Embedding model</h2>
@@ -95,20 +95,6 @@ transformer model, computed in-browser over a hand-written corpus of 180 factual
       <option value="5" selected>5</option>
       <option value="10">10</option>
       <option value="20">20</option>
-    </select>
-  </label>
-  <label>HNSW efConstruction / M
-    <select id="hnswParams">
-      <option value="100,12">100 / 12 (fast build, lower recall)</option>
-      <option value="200,16" selected>200 / 16 (default)</option>
-      <option value="400,32">400 / 32 (slow build, higher recall)</option>
-    </select>
-  </label>
-  <label>HNSW efSearch
-    <select id="hnswEfSearch">
-      <option value="16">16 (fast, lower recall)</option>
-      <option value="64" selected>64 (balanced)</option>
-      <option value="128">128 (slower, higher recall)</option>
     </select>
   </label>
   <button id="runBtn">Embed corpus &amp; run benchmark</button>
@@ -158,7 +144,7 @@ necessarily wrong (cross-topic sentences can be legitimately close), it's there 
 import { BrowserVec, transformersEmbedder } from '../src/index.ts';
 import { corpus as fullCorpus, queries as handQueries } from './data/real-corpus.mjs';
 import {
-  standardEngines, runEngine, recallAgainst, makeNaiveBruteForceEngine,
+  browserVecEngines, runEngine, recallAgainst, makeNaiveBruteForceEngine,
   createBenchDevice, renderResultsTable, renderStandardCharts,
 } from './lib/engines.js';
 
@@ -250,8 +236,6 @@ function recallQueries(n, corpusVectors, count, seed = 1337) {
 
 async function runAll() {
   const k = parseInt($('kVal').value);
-  const [efConstruction, m] = $('hnswParams').value.split(',').map(Number);
-  const efSearch = Math.max(parseInt($('hnswEfSearch').value), k);
 
   $('runBtn').disabled = true;
   $('log').textContent = '';
@@ -285,7 +269,7 @@ async function runAll() {
   const gtRun = await runEngine(makeNaiveBruteForceEngine(dim), corpus, queries, k, log);
   const groundTruth = gtRun.perQueryIds.map((ids) => new Set(ids));
 
-  const engines = standardEngines(dim, n, { efConstruction, m, efSearch }, log);
+  const engines = browserVecEngines(dim);
 
   const results = [{ ...gtRun, recall: 1 }];
   for (const engine of engines) {
@@ -306,8 +290,7 @@ async function runAll() {
     results,
   );
   $('configNote').textContent =
-    `${modelCfg.id} (${dim}d) via ${$('backend').value} · ${n} docs · k=${k} · ` +
-    `HNSW: efConstruction=${efConstruction}, M=${m}, efSearch=${efSearch}.`;
+    `${modelCfg.id} (${dim}d) via ${$('backend').value} · ${n} docs · k=${k}.`;
 
   await runQualitative(modelCfg, docs, docVectors, queryVectors);
 
