@@ -31,7 +31,7 @@
 </head>
 <body>
 <h1>Movie Recommender</h1>
-<p class="subtitle">Pick a movie you like — BrowserVec finds similar ones by description (like "more like this").</p>
+<p class="subtitle">Pick a movie you like — BrowserVec finds similar ones by description (like "more like this"). Flat search works with or without WebGPU; IVF requires WebGPU.</p>
 
 <div class="toolbar">
   <select id="movieSelect">
@@ -129,6 +129,14 @@ async function getRecommendations(movieId) {
 async function buildIndex(useIVF) {
   const stats = $('stats');
   stats.textContent = 'Building movie index...';
+  isReady = false;
+
+  if (useIVF && !BrowserVec.isSupported().webgpu) {
+    stats.textContent = 'IVF requires WebGPU — switch it off to use CPU fallback.';
+    $('useIVF').checked = false;
+    $('recommendBtn').disabled = true;
+    return;
+  }
 
   if (db) db.destroy();
 
@@ -137,6 +145,7 @@ async function buildIndex(useIVF) {
     dimension: 384,
     metric: 'cosine',
     embedder,
+    fallback: 'wasm',
     ann: useIVF ? {} : undefined,
   });
 
@@ -146,30 +155,29 @@ async function buildIndex(useIVF) {
     metadata: { title: m.title, genre: m.genre, year: m.year, desc: m.desc },
   })));
 
-  stats.textContent = `${db.count} movies indexed using ${useIVF ? 'IVF' : 'flat'} index` + (useIVF ? ` (nlist=${db.stats().nlist})` : '');
+  const backend = db.stats().device;
+  const backendNote = backend === 'webgpu'
+    ? 'running on GPU'
+    : 'no WebGPU detected, running on CPU fallback (exact results, same recall)';
+  stats.textContent = `${db.count} movies indexed using ${useIVF ? 'IVF' : 'flat'} index — ${backendNote}` + (useIVF ? ` (nlist=${db.stats().nlist})` : '');
+  $('recommendBtn').disabled = !$('movieSelect').value;
   isReady = true;
 }
 
 async function init() {
-  $('stats').textContent = 'Checking WebGPU...';
-  if (!BrowserVec.isSupported().webgpu) {
-    $('stats').textContent = 'WebGPU not available.';
-    return;
-  }
-
   populateSelect();
 
   await buildIndex(false);
 
   $('movieSelect').onchange = () => {
-    $('recommendBtn').disabled = !$('movieSelect').value;
+    $('recommendBtn').disabled = !$('movieSelect').value || !isReady;
   };
 
   $('recommendBtn').onclick = () => getRecommendations($('movieSelect').value);
 
   $('useIVF').onchange = async () => {
     await buildIndex($('useIVF').checked);
-    if ($('movieSelect').value) getRecommendations($('movieSelect').value);
+    if (isReady && $('movieSelect').value) getRecommendations($('movieSelect').value);
   };
 
   // Auto-recommend on first selection

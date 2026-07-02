@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>03. IVF approximate index (M4)</h1>
-<p class="dim">Instead of scanning every row, an <b>IVF</b> (inverted file index) clusters the corpus with k-means (GPU-assisted assignment). A query scores centroids, picks the <b>nprobe</b> nearest clusters, and scans only those rows. Tune <b>nprobe</b> to trade recall for speed. Index builds lazily on the first query after ingest.</p>
+<p class="dim">Instead of scanning every row, an <b>IVF</b> (inverted file index) clusters the corpus with k-means (GPU-assisted assignment). A query scores centroids, picks the <b>nprobe</b> nearest clusters, and scans only those rows. Tune <b>nprobe</b> to trade recall for speed. Index builds lazily on the first query after ingest. This example is <b>GPU-only</b> — there is no CPU fallback for IVF.</p>
 
 <pre id="out">ready.</pre>
 
@@ -28,7 +28,10 @@ const rand = (dim) => { const v = new Float32Array(dim); for (let i = 0; i < dim
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+  if (!BrowserVec.isSupported().webgpu) {
+    log('This example is GPU-only — the IVF index relies on GPU-assisted k-means clustering and has no CPU fallback (see docs/features.md#cpu-fallback).', 'bad');
+    return log('Try 01-basic-flat.html or 05-text-retrieval.html instead, which run everywhere via BrowserVec\'s WASM fallback.', 'dim');
+  }
 
   const n = +$('n').value;
   const dim = +$('dim').value;

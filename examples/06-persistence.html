@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>06. Persistence (M2)</h1>
-<p class="dim">Save a store to <b>OPFS</b> (File System Access API) or fallback to <b>IndexedDB</b>; reload it on a cold start. Export to a single binary blob and import it elsewhere. Vectors are persisted already normalized so query results are exactly reproducible.</p>
+<p class="dim">Save a store to <b>OPFS</b> (File System Access API) or fallback to <b>IndexedDB</b>; reload it on a cold start. Export to a single binary blob and import it elsewhere. Vectors are persisted already normalized so query results are exactly reproducible. Runs on CPU fallback (WASM-SIMD) if WebGPU is unavailable.</p>
 
 <pre id="out">ready.</pre>
 
@@ -30,7 +30,6 @@ $('run').onclick = async () => {
   out.textContent = '';
   const support = BrowserVec.isSupported();
   log(`support: ${JSON.stringify(support)}`);
-  if (!support.webgpu) return log('WebGPU not available.', 'bad');
   if (!support.opfs) log('OPFS unavailable — will use IndexedDB fallback.', 'dim');
 
   const n = +$('n').value;
@@ -44,7 +43,10 @@ $('run').onclick = async () => {
   // 1. CREATE + INGEST + SAVE
   log(`\n--- Phase 1: Create, ingest, save ---`);
   let t = performance.now();
-  let db = await BrowserVec.create({ dimension: dim, persist: { name } });
+  let db = await BrowserVec.create({ dimension: dim, persist: { name }, fallback: 'wasm' });
+  if (db.stats().device !== 'webgpu') {
+    log('No WebGPU — running on CPU fallback (WASM-SIMD), exact fp32 results.', 'dim');
+  }
   await db.addBatch(records);
   const ingestMs = performance.now() - t;
   log(`ingested ${db.count} vectors in ${ingestMs.toFixed(0)} ms`);
@@ -63,7 +65,7 @@ $('run').onclick = async () => {
   // 2. COLD-START RELOAD
   log(`\n--- Phase 2: Cold-start reload ---`);
   t = performance.now();
-  const db2 = await BrowserVec.create({ dimension: dim, persist: { name } });
+  const db2 = await BrowserVec.create({ dimension: dim, persist: { name }, fallback: 'wasm' });
   const loadMs = performance.now() - t;
   log(`reloaded ${db2.count} vectors in ${loadMs.toFixed(1)} ms`, db2.count === n ? 'ok' : 'bad');
 
@@ -78,7 +80,7 @@ $('run').onclick = async () => {
   const exportMs = performance.now() - t;
   log(`exported ${(blob.size / 1024).toFixed(1)} KiB in ${exportMs.toFixed(0)} ms`, 'dim');
 
-  const db3 = await BrowserVec.import(blob);
+  const db3 = await BrowserVec.import(blob, { fallback: 'wasm' });
   const imported = (await db3.query(probe, { k: 3 })).map((h) => h.id).join(', ');
   log(`imported: ${db3.count} vectors`);
   log(`import query: [${imported}]`, imported === before ? 'ok' : 'bad');

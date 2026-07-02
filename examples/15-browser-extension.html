@@ -247,7 +247,7 @@ document.getElementById('clearBtn').onclick = async () => {
   // Destroy and recreate
   db.destroy();
   const embedder = hashingEmbedder({ dimension: 384 });
-  db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder });
+  db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder, fallback: 'wasm' });
   // Clear persisted storage too
   try {
     const backend = db['backend'];
@@ -276,21 +276,19 @@ document.querySelectorAll('.tab-bar button').forEach(btn => {
 // ---- Init ----
 async function init() {
   log('starting…');
-  if (!BrowserVec.isSupported().webgpu) {
-    log('WebGPU needed', false);
-    document.querySelectorAll('button').forEach(b => b.disabled = true);
-    return;
-  }
 
   const embedder = hashingEmbedder({ dimension: 384 });
   db = await BrowserVec.create({
     dimension: 384,
     metric: 'cosine',
     embedder,
+    fallback: 'wasm',
     persist: { name: 'page-keeper', autoLoad: true },
   });
 
-  log(db.count > 0 ? `${db.count} loaded` : 'ready');
+  const backend = db.stats().device;
+  const label = db.count > 0 ? `${db.count} loaded` : 'ready';
+  log(backend === 'webgpu' ? label : `${label} · CPU fallback`, backend === 'webgpu');
   updateCounts();
   document.getElementById('captureBtn').disabled = false;
   document.getElementById('saveBtn').disabled = false;

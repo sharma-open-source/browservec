@@ -29,12 +29,12 @@ $('run').onclick = async () => {
   log(`--- 1. isSupported() ---`);
   const support = BrowserVec.isSupported();
   log(JSON.stringify(support, null, 2));
-  if (!support.webgpu) return log('WebGPU not available — remaining examples need it.', 'bad');
+  if (!support.webgpu) log('WebGPU not available — plain sections run on CPU fallback; quantBits/ann sections will be skipped.', 'dim');
 
   // 2. Different dimensions
   log(`\n--- 2. Configurable dimensions ---`);
   for (const dim of [128, 384, 768, 1024]) {
-    const db = await BrowserVec.create({ dimension: dim, metric: 'cosine' });
+    const db = await BrowserVec.create({ dimension: dim, metric: 'cosine', fallback: 'wasm' });
     const v = rand(dim);
     await db.add({ id: 'x', vector: v });
     const hits = await db.query(v, { k: 1 });
@@ -46,7 +46,7 @@ $('run').onclick = async () => {
   // 3. Dimension validation (mismatch error)
   log(`\n--- 3. Dimension mismatch error ---`);
   try {
-    await BrowserVec.create({ dimension: 0 });
+    await BrowserVec.create({ dimension: 0, fallback: 'wasm' });
   } catch (e) {
     log(`dimension=0 rejected: ${e.message}`, 'ok');
   }
@@ -54,7 +54,7 @@ $('run').onclick = async () => {
   // 4. Metric: cosine, dot, L2
   log(`\n--- 4. Metric comparison ---`);
   for (const metric of ['cosine', 'dot', 'l2']) {
-    const db = await BrowserVec.create({ dimension: 8, metric });
+    const db = await BrowserVec.create({ dimension: 8, metric, fallback: 'wasm' });
     const v = rand(8);
     await db.add({ id: 'x', vector: v });
     const hits = await db.query(v, { k: 1 });
@@ -65,55 +65,67 @@ $('run').onclick = async () => {
   // 5. stats() with different configs
   log(`\n--- 5. stats() various configs ---`);
 
-  const flat = await BrowserVec.create({ dimension: 64, metric: 'cosine' });
+  const flat = await BrowserVec.create({ dimension: 64, metric: 'cosine', fallback: 'wasm' });
   await flat.addBatch([{ id: 'a', vector: rand(64) }, { id: 'b', vector: rand(64) }]);
   log(`flat store stats: ${JSON.stringify(flat.stats(), null, 2)}`, 'dim');
   flat.destroy();
 
-  const quantDb = await BrowserVec.create({ dimension: 64, metric: 'cosine', quantBits: 8 });
-  await quantDb.addBatch([{ id: 'a', vector: rand(64) }]);
-  log(`quantized stats: ${JSON.stringify(quantDb.stats(), null, 2)}`, 'dim');
-  quantDb.destroy();
+  try {
+    const quantDb = await BrowserVec.create({ dimension: 64, metric: 'cosine', quantBits: 8 });
+    await quantDb.addBatch([{ id: 'a', vector: rand(64) }]);
+    log(`quantized stats: ${JSON.stringify(quantDb.stats(), null, 2)}`, 'dim');
+    quantDb.destroy();
+  } catch (e) {
+    log(`skipped — quantized store requires WebGPU`, 'dim');
+  }
 
-  const ivfDb = await BrowserVec.create({ dimension: 64, metric: 'cosine', ann: {} });
-  await ivfDb.addBatch(Array.from({ length: 500 }, (_, i) => ({ id: `v${i}`, vector: rand(64) })));
-  await ivfDb.query(rand(64), { k: 1 }); // triggers build
-  log(`IVF stats: ${JSON.stringify(ivfDb.stats(), null, 2)}`, 'dim');
-  ivfDb.destroy();
+  try {
+    const ivfDb = await BrowserVec.create({ dimension: 64, metric: 'cosine', ann: {} });
+    await ivfDb.addBatch(Array.from({ length: 500 }, (_, i) => ({ id: `v${i}`, vector: rand(64) })));
+    await ivfDb.query(rand(64), { k: 1 }); // triggers build
+    log(`IVF stats: ${JSON.stringify(ivfDb.stats(), null, 2)}`, 'dim');
+    ivfDb.destroy();
+  } catch (e) {
+    log(`skipped — IVF store requires WebGPU`, 'dim');
+  }
 
   // 6. autoLoad: false
   log(`\n--- 6. autoLoad: false ---`);
   const name = 'advanced-example';
-  let d = await BrowserVec.create({ dimension: 64, persist: { name } });
+  let d = await BrowserVec.create({ dimension: 64, persist: { name }, fallback: 'wasm' });
   await d.addBatch([{ id: 'keep', vector: rand(64) }]);
   await d.save();
   d.destroy();
 
   // Without autoLoad: false, create() would auto-load. With it, we start empty.
-  const empty = await BrowserVec.create({ dimension: 64, persist: { name, autoLoad: false } });
+  const empty = await BrowserVec.create({ dimension: 64, persist: { name, autoLoad: false }, fallback: 'wasm' });
   log(`autoLoad=false: count = ${empty.count} (should be 0)`, empty.count === 0 ? 'ok' : 'bad');
   empty.destroy();
 
   // Reload with auto-load (default) to demonstrate it works.
-  const loaded = await BrowserVec.create({ dimension: 64, persist: { name } });
+  const loaded = await BrowserVec.create({ dimension: 64, persist: { name }, fallback: 'wasm' });
   log(`autoLoad=true: count = ${loaded.count} (should be 1)`, loaded.count === 1 ? 'ok' : 'bad');
   loaded.destroy();
 
   // 7. Device reuse
   log(`\n--- 7. Device reuse ---`);
-  const adapter = await navigator.gpu.requestAdapter();
-  const device = await adapter.requestDevice();
-  const db1 = await BrowserVec.create({ dimension: 32, device });
-  await db1.add({ id: 'a', vector: rand(32) });
-  const db2 = await BrowserVec.create({ dimension: 32, device }); // same device
-  log(`two stores sharing one GPU device: db1 count=${db1.count}, db2 count=${db2.count}`, 'ok');
-  db1.destroy();
-  db2.destroy();
+  if (!support.webgpu) {
+    log(`skipped — device reuse requires WebGPU`, 'dim');
+  } else {
+    const adapter = await navigator.gpu.requestAdapter();
+    const device = await adapter.requestDevice();
+    const db1 = await BrowserVec.create({ dimension: 32, device });
+    await db1.add({ id: 'a', vector: rand(32) });
+    const db2 = await BrowserVec.create({ dimension: 32, device }); // same device
+    log(`two stores sharing one GPU device: db1 count=${db1.count}, db2 count=${db2.count}`, 'ok');
+    db1.destroy();
+    db2.destroy();
+  }
 
   // 8. Missing persist methods
   log(`\n--- 8. save() without persist config ---`);
   try {
-    const noPersist = await BrowserVec.create({ dimension: 8 });
+    const noPersist = await BrowserVec.create({ dimension: 8, fallback: 'wasm' });
     await noPersist.save();
   } catch (e) {
     log(`save() without persist throws: ${e.message}`, 'ok');
@@ -122,7 +134,7 @@ $('run').onclick = async () => {
   // 9. Text methods without embedder
   log(`\n--- 9. queryText() without embedder ---`);
   try {
-    const noEmbed = await BrowserVec.create({ dimension: 8, metric: 'cosine' });
+    const noEmbed = await BrowserVec.create({ dimension: 8, metric: 'cosine', fallback: 'wasm' });
     await noEmbed.queryText('hello');
   } catch (e) {
     log(`queryText() without embedder throws: ${e.message}`, 'ok');

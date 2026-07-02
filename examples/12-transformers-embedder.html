@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>12. Transformers.js embedder (M5)</h1>
-<p class="dim">Real <b>semantic</b> embeddings via <code>@xenova/transformers</code>. The model (<code>all-MiniLM-L6-v2</code>, 384-dim) downloads once and is cached by the browser — later sessions run offline. The library is <b>lazy-loaded</b> (code-split) so it's never in the core bundle if you don't use it.</p>
+<p class="dim">Real <b>semantic</b> embeddings via <code>@xenova/transformers</code>. The model (<code>all-MiniLM-L6-v2</code>, 384-dim) downloads once and is cached by the browser — later sessions run offline. The library is <b>lazy-loaded</b> (code-split) so it's never in the core bundle if you don't use it. The vector store itself runs on CPU fallback (WASM-SIMD) if WebGPU is unavailable.</p>
 
 <pre id="out">ready.</pre>
 
@@ -23,7 +23,6 @@ const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
 
   log(`Loading transformers embedder (all-MiniLM-L6-v2, 384-dim)...`);
   log(`(First load downloads ~90 MB model — subsequent loads are instant.)`, 'dim');
@@ -51,7 +50,11 @@ $('run').onclick = async () => {
     dimension: 384,
     metric: 'cosine',
     embedder,
+    fallback: 'wasm',
   });
+  if (db.stats().device !== 'webgpu') {
+    log('No WebGPU — running on CPU fallback (WASM-SIMD), exact fp32 results.', 'dim');
+  }
 
   // Documents with semantically related content
   const docs = [

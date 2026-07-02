@@ -201,6 +201,9 @@ async function benchmark(corpus, dim, indexType) {
   };
 
   // Phase 1: Create
+  // Plain flat configs (no quant, no ANN) can run on the CPU fallback; quantized
+  // or IVF configs genuinely require WebGPU and have no fallback path.
+  const isPlainFlat = quantBits === 0 && ann === undefined;
   let t = performance.now();
   const db = await BrowserVec.create({
     dimension: dim,
@@ -208,6 +211,7 @@ async function benchmark(corpus, dim, indexType) {
     embedder,
     quantBits,
     ann,
+    ...(isPlainFlat ? { fallback: 'wasm' } : {}),
   });
   add('create', 'time', (performance.now() - t).toFixed(1) + ' ms');
 
@@ -257,7 +261,7 @@ async function benchmark(corpus, dim, indexType) {
     const refQs = qs.slice(0, Math.min(20, queries));
     const refCorpus = corpus.slice(0, refN);
 
-    const refDb = await BrowserVec.create({ dimension: dim, metric: 'cosine', embedder });
+    const refDb = await BrowserVec.create({ dimension: dim, metric: 'cosine', embedder, fallback: 'wasm' });
     await refDb.addTexts(refCorpus.map(d => ({ id: d.id, text: d.text })));
     await refDb.queryText(refQs[0].text, { k });
 
@@ -404,10 +408,18 @@ async function runSingle(indexType) {
   const corpus = generateCorpus(n);
 
   log(`Starting benchmark: ${indexType}...`);
-  const results = await benchmark(corpus, dim, indexType);
-  results.label += ` (${n.toLocaleString()} docs)`;
-
-  renderResults([results]);
+  $('runBtn').disabled = true;
+  $('compareBtn').disabled = true;
+  try {
+    const results = await benchmark(corpus, dim, indexType);
+    results.label += ` (${n.toLocaleString()} docs)`;
+    renderResults([results]);
+  } catch (e) {
+    log(`skipped — ${indexType} requires WebGPU: ${e.message}`, 'bad');
+  } finally {
+    $('runBtn').disabled = false;
+    $('compareBtn').disabled = false;
+  }
 }
 
 async function runAll() {

@@ -34,7 +34,7 @@
 </head>
 <body>
 <h1>RAG Chat Assistant</h1>
-<p class="subtitle">Ingest documents, then chat with an LLM that sees retrieved context — all offline in the browser.</p>
+<p class="subtitle">Ingest documents, then chat with an LLM that sees retrieved context — all offline in the browser, works with or without WebGPU.</p>
 <p class="status" id="status">Initializing...</p>
 
 <div class="layout">
@@ -164,12 +164,6 @@ async function answerQuestion(query) {
 }
 
 async function init() {
-  log('Checking WebGPU...');
-  if (!BrowserVec.isSupported().webgpu) {
-    log('WebGPU not available.', 'err');
-    return;
-  }
-
   log('Creating embedder and store...');
   const embedder = hashingEmbedder({ dimension: 384 });
 
@@ -177,13 +171,17 @@ async function init() {
     dimension: 384,
     metric: 'cosine',
     embedder,
+    fallback: 'wasm',
   });
 
   renderDocs();
 
   $('queryInput').disabled = false;
   $('sendBtn').disabled = false;
-  log('Ready — click a document to add it, then ask questions.', 'ok');
+  const backend = db.stats().device;
+  log(backend === 'webgpu'
+    ? 'Ready — running on GPU. Click a document to add it, then ask questions.'
+    : 'Ready — no WebGPU detected, running on CPU fallback (exact results, same recall). Click a document to add it, then ask questions.', 'ok');
 
   // Send on Enter
   $('queryInput').addEventListener('keydown', (e) => {

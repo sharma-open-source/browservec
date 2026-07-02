@@ -25,7 +25,8 @@ const rand = (dim) => { const v = new Float32Array(dim); for (let i = 0; i < dim
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+  const hasWebGPU = BrowserVec.isSupported().webgpu;
+  if (!hasWebGPU) log('WebGPU not available — running on CPU fallback (fp32 flat only).', 'dim');
 
   const dim = +$('dim').value;
 
@@ -40,7 +41,7 @@ $('run').onclick = async () => {
     log(`\n--- ${cfg.label} (${cfg.metric}) ---`);
     log(cfg.note, 'dim');
 
-    const db = await BrowserVec.create({ dimension: dim, metric: cfg.metric });
+    const db = await BrowserVec.create({ dimension: dim, metric: cfg.metric, fallback: 'wasm' });
     const corpus = Array.from({ length: 1000 }, (_, i) => ({ id: `v${i}`, vector: rand(dim) }));
     await db.addBatch(corpus);
 
@@ -72,6 +73,7 @@ $('run').onclick = async () => {
   log(`IVF (ANN) supports cosine and dot, but NOT l2.`, 'dim');
 
   log(`\n--- Quantization + metric restrictions ---`);
+  if (!hasWebGPU) log('this check requires WebGPU to construct a quant/ANN config — skipping.', 'dim');
   try {
     const bad = await BrowserVec.create({ dimension: 64, metric: 'l2', quantBits: 8 });
     await bad.addBatch([{ id: 'x', vector: rand(64) }]);

@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>04. IVF x quant combo (M4)</h1>
-<p class="dim">Combine IVF clustering with TurboQuant int8/int4 quantization. This is the <b>1M-vector path</b>: quantization shrinks each vector 4-8x, while IVF scans only a fraction of clusters. Together they make 1M x 768 fit in ~1 GB and query in under 10 ms.</p>
+<p class="dim">Combine IVF clustering with TurboQuant int8/int4 quantization. This is the <b>1M-vector path</b>: quantization shrinks each vector 4-8x, while IVF scans only a fraction of clusters. Together they make 1M x 768 fit in ~1 GB and query in under 10 ms. This example is <b>GPU-only</b> — neither quantization nor IVF has a CPU fallback.</p>
 
 <pre id="out">ready.</pre>
 
@@ -29,7 +29,10 @@ const nextPow2 = (n) => { let p = 4; while (p < n) p <<= 1; return p; };
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+  if (!BrowserVec.isSupported().webgpu) {
+    log('This example is GPU-only — it combines TurboQuant quantization and the IVF index, both of which run as GPU compute kernels with no CPU fallback (see docs/features.md#cpu-fallback).', 'bad');
+    return log('Try 01-basic-flat.html or 05-text-retrieval.html instead, which run everywhere via BrowserVec\'s WASM fallback.', 'dim');
+  }
 
   const n = +$('n').value;
   const dim = +$('dim').value;

@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>05. Text retrieval (M5)</h1>
-<p class="dim">End-to-end offline text search: documents in, queries in, results out — all on-device. Uses the bundled <b>hashingEmbedder</b> (zero-dep, lexical, offline). For semantic search, swap in <code>transformersEmbedder</code> — same API.</p>
+<p class="dim">End-to-end offline text search: documents in, queries in, results out — all on-device (runs on CPU fallback if WebGPU is unavailable). Uses the bundled <b>hashingEmbedder</b> (zero-dep, lexical, offline). For semantic search, swap in <code>transformersEmbedder</code> — same API.</p>
 
 <pre id="out">ready.</pre>
 
@@ -23,12 +23,14 @@ const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
 
   // 1. Create an embedder and store
   const embedder = hashingEmbedder({ dimension: 384 });
-  const db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder });
+  const db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder, fallback: 'wasm' });
   log(`embedder dim=${embedder.dimension}`, 'dim');
+  if (db.stats().device !== 'webgpu') {
+    log('No WebGPU — running on CPU fallback (WASM-SIMD), exact fp32 results.', 'dim');
+  }
 
   // 2. Ingest documents via addTexts
   const docs = [

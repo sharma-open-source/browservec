@@ -34,7 +34,7 @@
 </head>
 <body>
 <h1>Personal Knowledge Base</h1>
-<p class="subtitle">Store notes with semantic search — type a thought, find related ones. Data persists across sessions.</p>
+<p class="subtitle">Store notes with semantic search — type a thought, find related ones. Data persists across sessions, works with or without WebGPU.</p>
 
 <div class="stats" id="stats">Initializing...</div>
 
@@ -137,12 +137,6 @@ async function addNote() {
 }
 
 async function init() {
-  $('stats').textContent = 'Checking WebGPU...';
-  if (!BrowserVec.isSupported().webgpu) {
-    $('stats').textContent = 'WebGPU not available.';
-    return;
-  }
-
   $('stats').textContent = 'Loading knowledge base...';
 
   const embedder = hashingEmbedder({ dimension: 384 });
@@ -152,10 +146,15 @@ async function init() {
     dimension: 384,
     metric: 'cosine',
     embedder,
+    fallback: 'wasm',
     persist: { name: STORE_NAME, autoLoad: true },
   });
 
-  $('stats').textContent = `${db.count} notes loaded`;
+  const backend = db.stats().device;
+  const backendNote = backend === 'webgpu'
+    ? 'running on GPU'
+    : 'no WebGPU detected, running on CPU fallback (exact results, same recall)';
+  $('stats').textContent = `${db.count} notes loaded — ${backendNote}`;
   if (db.count > 0) await search('');
 
   // Event handlers
@@ -171,7 +170,7 @@ async function init() {
     db.destroy();
     // Create fresh store, overwriting the old one
     db = await BrowserVec.create({
-      dimension: 384, metric: 'cosine', embedder,
+      dimension: 384, metric: 'cosine', embedder, fallback: 'wasm',
       persist: { name: STORE_NAME, autoLoad: false },
     });
     await db.save(); // overwrite with empty

@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>11. Custom embedder (M5)</h1>
-<p class="dim">The <code>Embedder</code> interface accepts any object with <code>{ dimension, embed(texts): Promise<Float32Array[]> }</code>. This lets you plug in a remote API, a custom model, a random baseline, or any other embedding source.</p>
+<p class="dim">The <code>Embedder</code> interface accepts any object with <code>{ dimension, embed(texts): Promise<Float32Array[]> }</code>. This lets you plug in a remote API, a custom model, a random baseline, or any other embedding source. Runs on CPU fallback (WASM-SIMD) if WebGPU is unavailable.</p>
 
 <pre id="out">ready.</pre>
 
@@ -23,7 +23,6 @@ const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
 
   // ---- Example 1: Random embedder (baseline / test) ----
   log(`=== Custom embedder: Random ===`);
@@ -43,7 +42,10 @@ $('run').onclick = async () => {
     },
   };
 
-  const db = await BrowserVec.create({ dimension: 64, metric: 'cosine', embedder: randomEmbedder });
+  const db = await BrowserVec.create({ dimension: 64, metric: 'cosine', embedder: randomEmbedder, fallback: 'wasm' });
+  if (db.stats().device !== 'webgpu') {
+    log('No WebGPU — running on CPU fallback (WASM-SIMD), exact fp32 results.', 'dim');
+  }
   await db.addTexts([
     { id: 'a', text: 'first document' },
     { id: 'b', text: 'second document' },
@@ -80,7 +82,7 @@ $('run').onclick = async () => {
   }
 
   const bow = bowEmbedder(100);
-  const db2 = await BrowserVec.create({ dimension: 100, metric: 'cosine', embedder: bow });
+  const db2 = await BrowserVec.create({ dimension: 100, metric: 'cosine', embedder: bow, fallback: 'wasm' });
   await db2.addTexts([
     { id: 'd1', text: 'apple banana cherry date', metadata: { topic: 'fruit' } },
     { id: 'd2', text: 'apple apple banana banana', metadata: { topic: 'fruit' } },
@@ -116,7 +118,7 @@ $('run').onclick = async () => {
     },
   };
 
-  const db3 = await BrowserVec.create({ dimension: 4, metric: 'cosine', embedder: fixedEmbedder });
+  const db3 = await BrowserVec.create({ dimension: 4, metric: 'cosine', embedder: fixedEmbedder, fallback: 'wasm' });
 
   // Add vectors directly (not via addText):
   await db3.addBatch([

@@ -28,7 +28,7 @@
 </head>
 <body>
 <h1>Code Snippet Search</h1>
-<p class="subtitle">Search your code snippets by intent — "find something that sorts arrays" or "how do I read a file".</p>
+<p class="subtitle">Search your code snippets by intent — "find something that sorts arrays" or "how do I read a file". Works with or without WebGPU.</p>
 
 <div class="toolbar">
   <input id="searchInput" type="text" placeholder="e.g. 'sort an array', 'read a file', 'make an HTTP request'..." />
@@ -125,16 +125,10 @@ async function search(query, lang) {
 }
 
 async function init() {
-  $('stats').textContent = 'Checking WebGPU...';
-  if (!BrowserVec.isSupported().webgpu) {
-    $('stats').textContent = 'WebGPU not available.';
-    return;
-  }
-
   $('stats').textContent = `Indexing ${SNIPPETS.length} code snippets...`;
 
   const embedder = hashingEmbedder({ dimension: 384 });
-  db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder });
+  db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder, fallback: 'wasm' });
 
   await db.addTexts(SNIPPETS.map(s => ({
     id: s.id,
@@ -142,7 +136,11 @@ async function init() {
     metadata: { title: s.title, lang: s.lang, tags: s.tags.join(', ') },
   })));
 
-  $('stats').textContent = `${db.count} code snippets indexed`;
+  const backend = db.stats().device;
+  const backendNote = backend === 'webgpu'
+    ? 'running on GPU'
+    : 'no WebGPU detected, running on CPU fallback (exact results, same recall)';
+  $('stats').textContent = `${db.count} code snippets indexed — ${backendNote}`;
   await search('', '');
 
   $('searchBtn').onclick = () => search($('searchInput').value, $('langFilter').value);

@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>07. Encryption at rest (M6)</h1>
-<p class="dim">Persisted snapshots and exported blobs can be sealed with <b>AES-256-GCM</b> (passphrase stretched via PBKDF2-SHA256). Covers: encrypted save/load, wrong passphrase rejection, missing passphrase rejection, and encrypted export/import.</p>
+<p class="dim">Persisted snapshots and exported blobs can be sealed with <b>AES-256-GCM</b> (passphrase stretched via PBKDF2-SHA256). Covers: encrypted save/load, wrong passphrase rejection, missing passphrase rejection, and encrypted export/import. Runs on CPU fallback (WASM-SIMD) if WebGPU is unavailable.</p>
 
 <pre id="out">ready.</pre>
 
@@ -24,7 +24,6 @@ const rand = (dim) => { const v = new Float32Array(dim); for (let i = 0; i < dim
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
   if (!globalThis.crypto?.subtle) return log('WebCrypto (crypto.subtle) unavailable.', 'bad');
 
   const dim = 64;
@@ -38,8 +37,11 @@ $('run').onclick = async () => {
   // 1. CREATE + SAVE encrypted
   log(`--- Step 1: Create + ingest + save (encrypted) ---`);
   let db = await BrowserVec.create({
-    dimension: dim, persist: { name, encryption: { passphrase: pass } },
+    dimension: dim, persist: { name, encryption: { passphrase: pass } }, fallback: 'wasm',
   });
+  if (db.stats().device !== 'webgpu') {
+    log('No WebGPU — running on CPU fallback (WASM-SIMD), exact fp32 results.', 'dim');
+  }
   await db.addBatch(records);
   await db.save();
   const before = (await db.query(probe, { k: 3 })).map((h) => h.id).join(', ');
@@ -49,7 +51,7 @@ $('run').onclick = async () => {
   // 2. RELOAD with CORRECT passphrase -> success
   log(`\n--- Step 2: Reload with CORRECT passphrase ---`);
   db = await BrowserVec.create({
-    dimension: dim, persist: { name, encryption: { passphrase: pass } },
+    dimension: dim, persist: { name, encryption: { passphrase: pass } }, fallback: 'wasm',
   });
   const after = (await db.query(probe, { k: 3 })).map((h) => h.id).join(', ');
   log(`results: [${after}]`, after === before ? 'ok' : 'bad');
@@ -61,7 +63,7 @@ $('run').onclick = async () => {
   let rejected = false;
   try {
     const bad = await BrowserVec.create({
-      dimension: dim, persist: { name, encryption: { passphrase: 'wrong password' } },
+      dimension: dim, persist: { name, encryption: { passphrase: 'wrong password' } }, fallback: 'wasm',
     });
     bad.destroy();
   } catch (e) {
@@ -74,7 +76,7 @@ $('run').onclick = async () => {
   log(`\n--- Step 4: Reload with NO passphrase ---`);
   let needsPass = false;
   try {
-    const plain = await BrowserVec.create({ dimension: dim, persist: { name } });
+    const plain = await BrowserVec.create({ dimension: dim, persist: { name }, fallback: 'wasm' });
     plain.destroy();
   } catch (e) {
     needsPass = true;
@@ -85,12 +87,12 @@ $('run').onclick = async () => {
   // 5. ENCRYPTED EXPORT / IMPORT
   log(`\n--- Step 5: Encrypted export/import ---`);
   const db2 = await BrowserVec.create({
-    dimension: dim, persist: { name, encryption: { passphrase: pass } },
+    dimension: dim, persist: { name, encryption: { passphrase: pass } }, fallback: 'wasm',
   });
   const blob = await db2.export({ encryption: { passphrase: pass } });
   log(`exported encrypted blob: ${(blob.size / 1024).toFixed(1)} KiB`);
 
-  const db3 = await BrowserVec.import(blob, { encryption: { passphrase: pass } });
+  const db3 = await BrowserVec.import(blob, { encryption: { passphrase: pass }, fallback: 'wasm' });
   const imported = (await db3.query(probe, { k: 3 })).map((h) => h.id).join(', ');
   log(`import round-trip: [${imported}]`, imported === before ? 'ok' : 'bad');
 

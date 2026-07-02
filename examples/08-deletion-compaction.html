@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>08. Delete & compaction (M1 / M2)</h1>
-<p class="dim">Deletes are <b>tombstones</b>: the id vanishes from results instantly (no GPU rewrite). Memory is reclaimed when the store is persisted + reloaded (snapshots compact out deleted rows). Also demonstrates <b>update</b> (tombstone + append) and <b>compact()</b> (in-place rebuild).</p>
+<p class="dim">Deletes are <b>tombstones</b>: the id vanishes from results instantly (no GPU rewrite). Memory is reclaimed when the store is persisted + reloaded (snapshots compact out deleted rows). Also demonstrates <b>update</b> (tombstone + append) and <b>compact()</b> (in-place rebuild). The fp32 config runs everywhere (via the WASM CPU fallback); the int8 x IVF config is GPU-only and is skipped without WebGPU.</p>
 
 <pre id="out">ready.</pre>
 
@@ -33,7 +33,8 @@ const clusteredCorpus = (n, dim, nCenters, spread) => {
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+  const hasGpu = BrowserVec.isSupported().webgpu;
+  if (!hasGpu) log('WebGPU not available — the fp32 config will run via the WASM CPU fallback; the int8 x IVF config is GPU-only and will be skipped.', 'dim');
 
   const dim = 128;
   const n = 5000;
@@ -42,9 +43,14 @@ $('run').onclick = async () => {
   for (const cfg of [{ label: 'fp32' }, { label: 'int8 x IVF', quantBits: 8, ann: {} }]) {
     log(`\n========== ${cfg.label} ==========`);
 
+    if ((cfg.quantBits || cfg.ann) && !hasGpu) {
+      log(`skipped — ${cfg.label} requires WebGPU (no CPU fallback for quantBits/ann)`, 'dim');
+      continue;
+    }
+
     const corpus = clusteredCorpus(n, dim, 40, 0.35);
     const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
-    const base = { dimension: dim, metric: 'cosine' };
+    const base = { dimension: dim, metric: 'cosine', fallback: 'wasm' };
     if (cfg.quantBits) base.quantBits = cfg.quantBits;
     if (cfg.ann) base.ann = cfg.ann;
 
@@ -89,7 +95,7 @@ $('run').onclick = async () => {
     log(`after deleting 100 more: count=${beforeCount}, tombstones=${beforeDeleted}`);
 
     const blob = await db.export();
-    const reloaded = await BrowserVec.import(blob, cfg.quantBits ? { quantBits: cfg.quantBits, ann: cfg.ann } : {});
+    const reloaded = await BrowserVec.import(blob, cfg.quantBits ? { quantBits: cfg.quantBits, ann: cfg.ann, fallback: 'wasm' } : { fallback: 'wasm' });
     const gone = reloaded.get('v0') === null;
     log(`export/reload count=${reloaded.count}, tombstones=${reloaded.stats().deleted ?? 0}`);
     log(`deleted ids absent after reload: ${gone}`, gone ? 'ok' : 'bad');

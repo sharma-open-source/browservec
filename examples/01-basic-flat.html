@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>01. Basic flat search (M1)</h1>
-<p class="dim">The simplest BrowserVec store: fp32 brute-force GPU scan, CPU top-k. Demonstrates <b>create</b>, <b>addBatch</b>, <b>query</b>, and comparing GPU results against a CPU reference.</p>
+<p class="dim">The simplest BrowserVec store: fp32 brute-force GPU scan, CPU top-k (falls back to CPU-only WASM-SIMD if WebGPU is unavailable). Demonstrates <b>create</b>, <b>addBatch</b>, <b>query</b>, and comparing results against a CPU reference.</p>
 
 <pre id="out">ready.</pre>
 
@@ -31,7 +31,6 @@ $('run').onclick = async () => {
   // 1. Check WebGPU support
   const support = BrowserVec.isSupported();
   log(`support: ${JSON.stringify(support)}`);
-  if (!support.webgpu) return log('WebGPU not available.', 'bad');
 
   const n = +$('n').value;
   const dim = +$('dim').value;
@@ -45,8 +44,14 @@ $('run').onclick = async () => {
 
   // 3. Create the store
   log(`\n--- Step 2: Create store ---`);
-  const db = await BrowserVec.create({ dimension: dim, metric: 'cosine' });
+  const db = await BrowserVec.create({ dimension: dim, metric: 'cosine', fallback: 'wasm' });
   log(`store: dim=${db.dimension}, metric=${db.metric}`);
+  const onGpu = db.stats().device === 'webgpu';
+  if (onGpu) {
+    log(`running on WebGPU.`, 'ok');
+  } else {
+    log('No WebGPU — running on CPU fallback (WASM-SIMD), exact fp32 results.', 'dim');
+  }
 
   // 4. Ingest vectors
   log(`\n--- Step 3: Ingest ---`);
@@ -55,18 +60,19 @@ $('run').onclick = async () => {
   const ingestMs = performance.now() - t;
   log(`ingested ${db.count} vectors in ${ingestMs.toFixed(0)} ms (${(n / (ingestMs / 1000) / 1000).toFixed(1)}k v/s)`);
 
-  // 5. Query the GPU
-  log(`\n--- Step 4: GPU query (k=${k}) ---`);
-  await db.query(query, { k }); // warm-up (compiles shaders)
+  // 5. Query the store
+  log(`\n--- Step 4: ${onGpu ? 'GPU' : 'CPU fallback'} query (k=${k}) ---`);
+  await db.query(query, { k }); // warm-up (compiles shaders on GPU; no-op on CPU fallback)
   t = performance.now();
   const hits = await db.query(query, { k });
-  const gpuMs = performance.now() - t;
-  log(`GPU query: ${gpuMs.toFixed(3)} ms`, 'ok');
+  const queryMs = performance.now() - t;
+  log(`${onGpu ? 'GPU' : 'CPU'} query: ${queryMs.toFixed(3)} ms`, 'ok');
   log(`top-${k} results:`);
   for (const h of hits) log(`  ${h.id.padStart(8)}  score ${h.score.toFixed(5)}`);
 
   // 6. CPU reference for correctness
   log(`\n--- Step 5: CPU reference ---`);
+  if (!onGpu) log(`(already running on CPU fallback above — this is an independent brute-force reference to verify exactness)`, 'dim');
   t = performance.now();
   const cpuRef = corpus
     .map((v, i) => {
@@ -77,15 +83,19 @@ $('run').onclick = async () => {
     .sort((a, b) => b.score - a.score)
     .slice(0, k);
   const cpuMs = performance.now() - t;
-  const speedup = (cpuMs / gpuMs).toFixed(1);
-  log(`CPU query: ${cpuMs.toFixed(1)} ms (speedup: ${speedup}x)`, 'dim');
+  if (onGpu) {
+    const speedup = (cpuMs / queryMs).toFixed(1);
+    log(`CPU query: ${cpuMs.toFixed(1)} ms (speedup: ${speedup}x)`, 'dim');
+  } else {
+    log(`reference CPU query: ${cpuMs.toFixed(1)} ms`, 'dim');
+  }
 
   // 7. Compare results
   const gpuIds = hits.map((h) => h.id);
   const refIds = cpuRef.map((r) => `v${r.row}`);
   const overlap = gpuIds.filter((id) => refIds.includes(id)).length;
   log(`\n--- Results ---`);
-  log(`recall@${k} vs CPU: ${overlap}/${k}`, overlap === k ? 'ok' : 'bad');
+  log(`recall@${k} vs reference: ${overlap}/${k}`, overlap === k ? 'ok' : 'bad');
   log(`total time: ${(performance.now() - startTotal).toFixed(0)} ms`, 'dim');
 
   // 8. Stats

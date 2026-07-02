@@ -216,7 +216,7 @@ function App() {
   // === useVectorStore (permanent instance) ===
   const embedder = useMemo(() => hashingEmbedder({ dimension: 384 }), []);
   const storeConfig = useMemo(() => ({
-    dimension: 384, metric: 'cosine', embedder,
+    dimension: 384, metric: 'cosine', embedder, fallback: 'wasm',
   }), []);
   const { store, ready, error: storeErr, stats, count } = useVectorStore(storeConfig);
 

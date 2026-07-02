@@ -40,7 +40,7 @@
 </head>
 <body>
 <h1>Customer Support FAQ</h1>
-<p class="subtitle">Users type their problem in natural language — BrowserVec finds the best FAQ answer semantically.</p>
+<p class="subtitle">Users type their problem in natural language — BrowserVec finds the best FAQ answer semantically. Works with or without WebGPU.</p>
 
 <div class="layout">
   <div class="faq-list" id="faqList">
@@ -170,16 +170,10 @@ async function answerQuestion(query) {
 }
 
 async function init() {
-  $('stats').textContent = 'Checking WebGPU...';
-  if (!BrowserVec.isSupported().webgpu) {
-    $('stats').textContent = 'WebGPU not available.';
-    return;
-  }
-
   $('stats').textContent = 'Indexing FAQ knowledge base...';
 
   const embedder = hashingEmbedder({ dimension: 384 });
-  db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder });
+  db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder, fallback: 'wasm' });
 
   await db.addTexts(FAQ.map(f => ({
     id: f.id,
@@ -188,7 +182,11 @@ async function init() {
   })));
 
   renderFAQ();
-  $('stats').textContent = `${db.count} FAQ articles indexed`;
+  const backend = db.stats().device;
+  const backendNote = backend === 'webgpu'
+    ? 'running on GPU'
+    : 'no WebGPU detected, running on CPU fallback (exact results, same recall)';
+  $('stats').textContent = `${db.count} FAQ articles indexed — ${backendNote}`;
 
   $('sendBtn').onclick = () => answerQuestion($('queryInput').value);
   $('queryInput').onkeydown = (e) => { if (e.key === 'Enter') answerQuestion($('queryInput').value); };

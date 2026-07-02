@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>09. Worker ingest (NFR-8)</h1>
-<p class="dim">For quantized stores (int8/int4), the CPU-heavy rotation + quantization runs in a <b>Web Worker</b> so the main thread stays responsive. This demo ingests in chunks while monitoring <code>requestAnimationFrame</code> gaps — smooth frames (~16 ms) mean the UI stays interactive during a large ingest.</p>
+<p class="dim">For quantized stores (int8/int4), the CPU-heavy rotation + quantization runs in a <b>Web Worker</b> so the main thread stays responsive. This demo ingests in chunks while monitoring <code>requestAnimationFrame</code> gaps — smooth frames (~16 ms) mean the UI stays interactive during a large ingest. This example is <b>GPU-only</b> — it demonstrates offloading the quantized (int8) ingest path, which has no CPU fallback.</p>
 
 <pre id="out">ready.</pre>
 
@@ -38,7 +38,10 @@ function clusteredCorpus(n, dim, nCenters, spread) {
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+  if (!BrowserVec.isSupported().webgpu) {
+    log('This example is GPU-only — it demonstrates Web Worker offload for quantized (int8) ingest, which requires WebGPU compute shaders and has no CPU fallback (see docs/features.md#cpu-fallback).', 'bad');
+    return log('Try 01-basic-flat.html or 05-text-retrieval.html instead, which run everywhere via BrowserVec\'s WASM fallback.', 'dim');
+  }
 
   const n = +$('n').value;
   const dim = +$('dim').value;

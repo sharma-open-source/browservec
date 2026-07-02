@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>02. TurboQuant quantization (M3)</h1>
-<p class="dim">Quantized vectors use 4x (int8) or 8x (int4) less memory than fp32. A randomized Hadamard rotation + scalar quantization packs vectors into smaller codes. An <b>asymmetric query</b> scores a full-precision query against quantized corpus in a WGSL kernel, then an <b>exact fp32 re-rank</b> recovers recall.</p>
+<p class="dim">Quantized vectors use 4x (int8) or 8x (int4) less memory than fp32. A randomized Hadamard rotation + scalar quantization packs vectors into smaller codes. An <b>asymmetric query</b> scores a full-precision query against quantized corpus in a WGSL kernel, then an <b>exact fp32 re-rank</b> recovers recall. This example is <b>GPU-only</b> — there is no CPU fallback for quantization.</p>
 
 <pre id="out">ready.</pre>
 
@@ -29,7 +29,10 @@ const nextPow2 = (n) => { let p = 4; while (p < n) p <<= 1; return p; };
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+  if (!BrowserVec.isSupported().webgpu) {
+    log('This example is GPU-only — TurboQuant quantization (int8/int4) runs as a WGSL compute kernel and has no CPU fallback (see docs/features.md#cpu-fallback).', 'bad');
+    return log('Try 01-basic-flat.html or 05-text-retrieval.html instead, which run everywhere via BrowserVec\'s WASM fallback.', 'dim');
+  }
 
   const n = +$('n').value;
   const dim = +$('dim').value;

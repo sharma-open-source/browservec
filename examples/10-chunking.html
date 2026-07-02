@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>10. Corpus chunking (NFR-10)</h1>
-<p class="dim">A single GPU storage buffer is capped by <code>maxStorageBufferBindingSize</code> (128 MiB on many devices). The flat index spreads vectors across multiple <b>chunks</b> — each fits within the limit — and queries dispatch the distance kernel once per chunk. The result is <b>identical</b> to a single-buffer scan.</p>
+<p class="dim">A single GPU storage buffer is capped by <code>maxStorageBufferBindingSize</code> (128 MiB on many devices). The flat index spreads vectors across multiple <b>chunks</b> — each fits within the limit — and queries dispatch the distance kernel once per chunk. The result is <b>identical</b> to a single-buffer scan. The fp32 config runs everywhere (via the WASM CPU fallback); the int8/IVF configs are GPU-only and are skipped without WebGPU.</p>
 
 <pre id="out">ready.</pre>
 
@@ -40,7 +40,8 @@ const nextPow2 = (n) => { let p = 4; while (p < n) p <<= 1; return p; };
 
 $('run').onclick = async () => {
   out.textContent = '';
-  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+  const hasGpu = BrowserVec.isSupported().webgpu;
+  if (!hasGpu) log('WebGPU not available — fp32 flat will run via the WASM CPU fallback; int8/IVF configs are GPU-only and will be skipped.', 'dim');
 
   const n = +$('n').value;
   const dim = +$('dim').value;
@@ -62,8 +63,14 @@ $('run').onclick = async () => {
   for (const cfg of configs) {
     log(`\n--- ${cfg.label} ---`);
 
+    const needsGpu = cfg.quantBits !== 0 || cfg.ann;
+    if (needsGpu && !hasGpu) {
+      log(`skipped — ${cfg.label} requires WebGPU (no CPU fallback for quantBits/ann)`, 'dim');
+      continue;
+    }
+
     // Reference: single-buffer store (natural chunking, likely 1 chunk)
-    const base = { dimension: dim, metric: 'cosine', quantBits: cfg.quantBits };
+    const base = { dimension: dim, metric: 'cosine', quantBits: cfg.quantBits, fallback: 'wasm' };
     if (cfg.ann) base.ann = cfg.ann;
 
     const ref = await BrowserVec.create(base);

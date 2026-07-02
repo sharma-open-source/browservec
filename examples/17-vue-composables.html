@@ -274,7 +274,7 @@ const app = createApp({
     const embedderInst = hashingEmbedder({ dimension: 384 });
     const embedder = ref(embedderInst);
 
-    const config = computed(() => ({ dimension: 384, metric: 'cosine', embedder: embedderInst }));
+    const config = computed(() => ({ dimension: 384, metric: 'cosine', embedder: embedderInst, fallback: 'wasm' }));
     const { store, ready: storeReady, error: storeError, stats, count } = useVectorStore(config.value);
 
     const { embed, embedding } = useEmbedding(embedder);
