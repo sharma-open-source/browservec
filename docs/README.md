@@ -4,10 +4,15 @@ This folder is for people modifying or extending BrowserVec itself — for
 usage as a library, start with the top-level [README.md](../README.md).
 
 - [architecture.md](./architecture.md) — module map, data flow, GPU vs. CPU
-  paths, how a query/ingest actually executes end to end.
+  paths, how a query/ingest actually executes end to end, and the
+  file↔spec-section mapping table.
 - [api-reference.md](./api-reference.md) — full public API surface
   (`BrowserVec` class, config types, return types), pulled from
   [src/index.ts](../src/index.ts) and [src/types.ts](../src/types.ts).
+- [features.md](./features.md) — per-feature guides with runnable code
+  (persistence, encryption, quantization, IVF, text embedding, Worker
+  offload, chunking, GPU top-k, CPU fallback) — the detailed version of the
+  [README's feature table](../README.md#features).
 - [internals.md](./internals.md) — per-subsystem notes: quantization codec,
   IVF/k-means, persistence format, Worker offload, CPU/WASM fallback.
 - [../REQUIREMENTS.md](../REQUIREMENTS.md) — the original design spec
@@ -15,5 +20,5 @@ usage as a library, start with the top-level [README.md](../README.md).
   comments reference sections of this file (e.g. `§NFR-8`, `§9 M4`).
 - [../CHANGELOG.md](../CHANGELOG.md) — release history.
 
-The [README's "How it maps to the design" table](../README.md#how-it-maps-to-the-design)
+[architecture.md's "How it maps to the design" table](./architecture.md#how-it-maps-to-the-design)
 is the fastest way to jump from a requirement to the file that implements it.

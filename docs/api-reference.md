@@ -36,7 +36,7 @@ linked from each entry below.
 
 | Member | Signature | Notes |
 |---|---|---|
-| `delete(id)` | `(id: string) => boolean` | Tombstones the row. `false` if `id` wasn't present. See [Deleting vectors](../README.md#deleting-vectors). |
+| `delete(id)` | `(id: string) => boolean` | Tombstones the row. `false` if `id` wasn't present. See [Deleting vectors](./features.md#deleting-vectors). |
 | `update(record)` | `(record: VectorRecord) => Promise<boolean>` | Tombstone + re-add (upsert). Returns whether an existing row was replaced. |
 | `compact()` | `() => Promise<number>` | Physically rebuilds the store + GPU index from live rows only, dropping tombstones. Returns rows removed (0 if nothing to do). |
 

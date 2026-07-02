@@ -146,8 +146,42 @@ in-thread if Workers aren't available, and report which path ran via
 `Stats.ingest` / `Stats.train`. See
 [internals.md](./internals.md#worker-offload-seam).
 
-## Where to look for a given requirement
+## How it maps to the design
 
-The README's [How it maps to the design](../README.md#how-it-maps-to-the-design)
-table is the authoritative file↔spec-section index — use it to jump from a
-`REQUIREMENTS.md` section (e.g. `§NFR-10`) to the implementing file.
+The authoritative file↔spec-section index — use it to jump from a
+[REQUIREMENTS.md](../REQUIREMENTS.md) section (e.g. `§NFR-10`) to the file that
+implements it.
+
+| Code | REQUIREMENTS.md |
+|------|-----------------|
+| [src/engine/wgsl/distance.ts](../src/engine/wgsl/distance.ts) | §14.2 levers 4 & 5 — `DIM`/`WG` baked as constants → unrolled `vec4` FMA; query staged in workgroup shared memory |
+| [src/index/flat.ts](../src/index/flat.ts) | §9 M1 — flat GPU brute-force; GPU top-k past 4k rows, CPU top-k below |
+| [src/engine/wgsl/topk.ts](../src/engine/wgsl/topk.ts) / [src/index/gpuTopk.ts](../src/index/gpuTopk.ts) | §14.2 lever 3 — on-GPU top-k reduction (segment argmax → short readback), on the flat fp32 + quantized int8/int4 paths |
+| [src/engine/buffers.ts](../src/engine/buffers.ts) | §NFR-10 — `ChunkedCorpus`: corpus split across GPU buffers past the per-buffer limit |
+| [src/engine/device.ts](../src/engine/device.ts) | §NFR-11 — device acquisition + device-loss wiring |
+| [src/persist/format.ts](../src/persist/format.ts) | §FR-16 — versioned binary snapshot codec |
+| [src/persist/opfs.ts](../src/persist/opfs.ts) / [indexeddb.ts](../src/persist/indexeddb.ts) | §NFR-6 — OPFS primary, IndexedDB fallback |
+| [src/persist/crypto.ts](../src/persist/crypto.ts) | §M6 — AES-256-GCM + PBKDF2 snapshot encryption at rest |
+| [src/fallback/cpu.ts](../src/fallback/cpu.ts) / [simd.ts](../src/fallback/simd.ts) | §NFR-7 / M6 — exact CPU flat scan for the no-WebGPU fallback (identical results); WASM-SIMD `f32x4` kernel (~7×), scalar JS fallback |
+| [src/store/store.ts](../src/store/store.ts) | §NFR-11 — CPU raw vectors are the persistence source of truth |
+| [src/quant/rotator.ts](../src/quant/rotator.ts) | §6 — data-oblivious randomized Hadamard rotation |
+| [src/quant/codec.ts](../src/quant/codec.ts) | §6 / §9 M3b — int8 snorm codec (matches `unpack4x8snorm`) + int4 nibble + 1-bit sign pack/unpack |
+| [src/engine/wgsl/distanceQ8.ts](../src/engine/wgsl/distanceQ8.ts) | §6.2 FR-Q4 / §14.2 lever 1 — int8 kernel, dequant in-shader |
+| [src/engine/wgsl/distanceQ4.ts](../src/engine/wgsl/distanceQ4.ts) | §9 M3b — int4 kernel, manual nibble unpack (~8× less memory) |
+| [src/engine/wgsl/distanceQ1.ts](../src/engine/wgsl/distanceQ1.ts) | §9 M3b — 1-bit binary kernel, sign-bit unpack + asymmetric scoring (~32× less memory) |
+| [src/index/quant.ts](../src/index/quant.ts) | §6 — quantized index + asymmetric query |
+| [src/index/kmeans.ts](../src/index/kmeans.ts) | §9 M4 — k-means (CPU helpers + init/update for the GPU-assisted loop) |
+| [src/index/kmeans.worker.ts](../src/index/kmeans.worker.ts) | §NFR-8 — k-means mean-update Worker; inlined via `?worker&inline` |
+| [src/index/kmeansTrainer.ts](../src/index/kmeansTrainer.ts) | §NFR-8 — trainer seam: Worker offload + in-thread fallback (reproducible either way) |
+| [src/engine/wgsl/assign.ts](../src/engine/wgsl/assign.ts) | §9 M4 — GPU centroid-assignment kernel (argmax dot) |
+| [src/engine/wgsl/distance.ts](../src/engine/wgsl/distance.ts) (indexed) | §9 M4 — indexed scan: score rows from a candidate-id list |
+| [src/index/ivf.ts](../src/index/ivf.ts) | §9 M4 / §NFR-10 — IVF index: reservoir sample, GPU-assisted build, probe→gather→chunked scan→GPU top-k |
+| [src/engine/wgsl/assignQ8.ts](../src/engine/wgsl/assignQ8.ts) | §9 M4 — quantized centroid-assignment kernel (dequant + argmax dot) |
+| [src/engine/wgsl/assignQ4.ts](../src/engine/wgsl/assignQ4.ts) | §9 M3b+M4 — 4-bit quantized centroid-assignment kernel |
+| [src/engine/wgsl/assignQ1.ts](../src/engine/wgsl/assignQ1.ts) | §9 M3b+M4 — 1-bit binary centroid-assignment kernel (IVF×1-bit combo) |
+| [src/index/ivfquant.ts](../src/index/ivfquant.ts) | §9 M4 / §NFR-10 — IVF × int8/int4 combo: clustered + quantized + chunked + GPU top-k, the 1M path |
+| [src/embed/hashing.ts](../src/embed/hashing.ts) | §9 M5 — zero-dep feature-hashing embedder (offline, lexical) |
+| [src/embed/transformers.ts](../src/embed/transformers.ts) | §9 M5 — optional transformers.js adapter (lazy, real semantics) |
+| [src/quant/encode.ts](../src/quant/encode.ts) | §NFR-8 — shared BatchEncoder (rotate+quantize), one impl for both threads |
+| [src/quant/quantize.worker.ts](../src/quant/quantize.worker.ts) | §NFR-8 — ingest Worker; inlined into the bundle via `?worker&inline` |
+| [src/quant/encoder.ts](../src/quant/encoder.ts) | §NFR-8 — encoder seam: Worker offload + in-thread fallback |
