@@ -458,6 +458,63 @@ them without a GPU is a clear error rather than a silent accuracy change. The de
 **CPU fallback** button flips an internal force-CPU seam to run the fallback in a
 WebGPU browser and verifies it returns the same neighbors as the GPU on identical data.
 
+## Benchmarks
+
+Numbers below are from the demo's **M6 device report** tool (fixed-seed 20k×384
+corpus, `recall@10` against an exact fp32 reference). This is a small, growing
+device matrix, not an exhaustive one — generate your own with the same tool
+(`npm run dev` → demo → **M6 device report**) or the interactive
+[perf-benchmark example](./examples/perf-benchmark.html), which sweeps corpus
+size/dimension/index type directly in the browser.
+
+**Chrome 149 / macOS, Apple M-series (Metal-3)** — WebGPU, OPFS, WASM-SIMD, and
+Worker offload all available; `maxStorageBufferBindingSize` = 4 GiB.
+
+| Config | recall@10 | Query latency |
+|---|---|---|
+| flat fp32 | 1.000 | 1.71 ms/q |
+| flat int8 | 1.000 | 1.52 ms/q |
+| flat int4 | 1.000 | 1.69 ms/q |
+| flat 1-bit | 1.000 | 2.45 ms/q |
+| IVF fp32 | 1.000 | 0.51 ms/q |
+| IVF int8 | 1.000 | 0.63 ms/q |
+| IVF int4 | 1.000 | 0.93 ms/q |
+| IVF 1-bit | 1.000 | 1.11 ms/q |
+| CPU fallback (WASM-SIMD), 8k rows | — | 1.76 ms/q |
+
+**Chrome (CriOS 149) / iPhone 15, iOS 26.5** — no WebGPU (iOS third-party
+browsers are WebKit under the hood, so WebGPU isn't exposed), no OPFS
+(IndexedDB is used instead), WASM-SIMD and Worker both available.
+
+| Config | Query latency |
+|---|---|
+| CPU fallback (WASM-SIMD), 8k rows | 0.40 ms/q |
+
+Takeaways so far (see [docs/internals.md](./docs/internals.md) for the kernel
+detail behind these):
+
+- **Sub-byte quantization is a memory lever, not a speed lever at this scale.**
+  The quantized kernels are ALU-bound (manual nibble/sign unpack costs more than
+  a plain fp32 `vec4` load), so query time actually *rises* as bit-width shrinks
+  at 20k rows (`fp32 ≈ int8 < int4 < 1-bit`). The payoff is memory (int8 ~4×,
+  int4 ~8×, 1-bit ~32× smaller) and, at much larger corpora, bandwidth — tighter
+  codes only start winning on throughput once the scan is bandwidth-bound rather
+  than ALU-bound.
+- **`maxStorageBufferBindingSize` varies a lot by GPU** — 4 GiB on Apple Metal
+  vs. a much more conservative default on many other adapters. Corpus chunking
+  (§NFR-10) triggers off the device's actual reported limit, so this needs no
+  configuration — but where the chunking crossover happens is device-dependent.
+- **iOS is CPU-fallback-only today**: no WebGPU means quantization/IVF are
+  unavailable and only exact fp32-flat search runs, over IndexedDB persistence
+  (no OPFS on iOS). Pass `fallback: 'wasm'` explicitly when targeting iOS Chrome
+  or Safari, or `BrowserVec.create()` will throw.
+
+Still missing from the matrix: Android Chrome (has WebGPU — a real gap),
+Windows + NVIDIA/AMD (likely a much smaller buffer-size cap, which would
+actually exercise chunking), and desktop Firefox/Safari. Contributions of a
+device-report JSON block from any of these are welcome — see
+[Contributing](#contributing).
+
 ## How it maps to the design
 
 | Code | REQUIREMENTS.md |
