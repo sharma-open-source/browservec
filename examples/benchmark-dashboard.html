@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BrowserVec — Benchmark Dashboard</title>
-<style>
+<style>.bv-nav{font-size:.78rem;margin:0 0 1rem;color:#888;}.bv-nav a{color:#888;text-decoration:none;}.bv-nav a:hover{color:#1a73e8;text-decoration:underline;}
   * { box-sizing: border-box; }
   body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem auto; max-width: 1080px; padding: 0 1rem; color: #222; }
   h1 { font-size: 1.3rem; margin-bottom: .25rem; }
@@ -35,6 +35,7 @@
 </style>
 </head>
 <body>
+<p class="bv-nav"><a href="./">&larr; All examples</a> &middot; <a href="../">Home</a></p>
 <h1>Benchmark Dashboard</h1>
 <p class="subtitle">BrowserVec vs. hnswlib-wasm vs. Vectorious (BLAS brute force) vs. naive JS brute force —
 latency, recall, memory, and ingest speed, all running live in this tab on synthetic clustered vectors.</p>

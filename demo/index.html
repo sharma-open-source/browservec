@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>BrowserVec — M1 demo</title>
-    <style>
+    <style>.bv-nav{font-size:.78rem;margin:0 0 1rem;color:#888;}.bv-nav a{color:#888;text-decoration:none;}.bv-nav a:hover{color:#1a73e8;text-decoration:underline;}
       body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem; max-width: 760px; }
       h1 { font-size: 1.2rem; }
       button { font: inherit; padding: 0.5rem 1rem; cursor: pointer; }
@@ -13,6 +13,7 @@
     </style>
   </head>
   <body>
+<p class="bv-nav"><a href="../">&larr; Home</a> &middot; <a href="../examples/">Examples</a></p>
     <h1>BrowserVec — M1 (flat GPU brute-force)</h1>
     <p class="dim">
       Generates a random corpus, runs a top-k query on the GPU, and checks the

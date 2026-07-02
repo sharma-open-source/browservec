@@ -11,13 +11,15 @@
   tradeoff: browsers can't resolve a bare specifier like '@xenova/transformers'
   from a dynamic import() on their own — that's what import maps are for, and
   it's needed here even under Vite's dev server, since @vite-ignore skips
-  Vite's own rewriting for this specific call site. Any page that calls
+  Vite's own rewriting for this specific call site. A CDN URL (not a local
+  node_modules path, which doesn't exist once this page is deployed as a
+  static site) is what actually resolves everywhere. Any page that calls
   transformersEmbedder() needs a mapping like this one.
 -->
 <script type="importmap">
-{ "imports": { "@xenova/transformers": "/node_modules/@xenova/transformers/dist/transformers.min.js" } }
+{ "imports": { "@xenova/transformers": "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/+esm" } }
 </script>
-<style>
+<style>.bv-nav{font-size:.78rem;margin:0 0 1rem;color:#888;}.bv-nav a{color:#888;text-decoration:none;}.bv-nav a:hover{color:#1a73e8;text-decoration:underline;}
   * { box-sizing: border-box; }
   body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem auto; max-width: 1080px; padding: 0 1rem; color: #222; }
   h1 { font-size: 1.3rem; margin-bottom: .25rem; }
@@ -52,6 +54,7 @@
 </style>
 </head>
 <body>
+<p class="bv-nav"><a href="./">&larr; All examples</a> &middot; <a href="../">Home</a></p>
 <h1>Real-Embeddings Benchmark</h1>
 <p class="subtitle">BrowserVec only — flat fp32, int8 + rerank, and 1-bit + rerank — over real sentence embeddings from a real
 transformer model, computed in-browser over a hand-written corpus of 180 factual documents across 12 topics.</p>

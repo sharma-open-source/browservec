@@ -4,9 +4,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BrowserVec — 02. TurboQuant quantization</title>
-<style>body{font:14px/1.5 ui-monospace,monospace;margin:2rem;max-width:780px}pre{background:#111;color:#b9f;padding:1rem;border-radius:6px;overflow:auto}button{font:inherit;padding:.4rem .8rem;cursor:pointer}.ok{color:#5c5}.bad{color:#f55}.dim{color:#888}.hl{color:#fe9}h2{font-size:1.1rem;border-bottom:1px solid #333;padding-bottom:.25rem}</style>
+<style>.bv-nav{font-size:.78rem;margin:0 0 1rem;color:#888;}.bv-nav a{color:#888;text-decoration:none;}.bv-nav a:hover{color:#1a73e8;text-decoration:underline;}body{font:14px/1.5 ui-monospace,monospace;margin:2rem;max-width:780px}pre{background:#111;color:#b9f;padding:1rem;border-radius:6px;overflow:auto}button{font:inherit;padding:.4rem .8rem;cursor:pointer}.ok{color:#5c5}.bad{color:#f55}.dim{color:#888}.hl{color:#fe9}h2{font-size:1.1rem;border-bottom:1px solid #333;padding-bottom:.25rem}</style>
 </head>
 <body>
+<p class="bv-nav"><a href="./">&larr; All examples</a> &middot; <a href="../">Home</a></p>
 <h1>02. TurboQuant quantization (M3)</h1>
 <p class="dim">Quantized vectors use 4x (int8) or 8x (int4) less memory than fp32. A randomized Hadamard rotation + scalar quantization packs vectors into smaller codes. An <b>asymmetric query</b> scores a full-precision query against quantized corpus in a WGSL kernel, then an <b>exact fp32 re-rank</b> recovers recall. This example is <b>GPU-only</b> — there is no CPU fallback for quantization.</p>
 
