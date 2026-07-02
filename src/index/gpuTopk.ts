@@ -11,6 +11,7 @@
 
 import type { DeviceContext } from '../engine/device.js';
 import { buildTopKShader } from '../engine/wgsl/topk.js';
+import { tracedGpuWait } from '../engine/profile.js';
 import type { FlatHit } from './flat.js';
 
 /** WG must be a power of two (reduction tree) and match the shader's segment size. */
@@ -34,6 +35,7 @@ export class GpuTopK {
   private partialRow: GPUBuffer | null = null;
   private readback: GPUBuffer | null = null;
   private capacityPairs = 0;
+  private readonly paramsScratch = new Uint32Array(4);
 
   constructor(private readonly ctx: DeviceContext) {
     const { device } = ctx;
@@ -107,7 +109,9 @@ export class GpuTopK {
     const partialRow = this.partialRow!;
     const readback = this.readback!;
 
-    device.queue.writeBuffer(this.paramsBuf, 0, new Uint32Array([n, k, 0, 0]));
+    this.paramsScratch[0] = n;
+    this.paramsScratch[1] = k;
+    device.queue.writeBuffer(this.paramsBuf, 0, this.paramsScratch);
     const bind = device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -129,12 +133,15 @@ export class GpuTopK {
     enc.copyBufferToBuffer(partialRow, 0, readback, region, region);
     device.queue.submit([enc.finish()]);
 
-    await readback.mapAsync(GPUMapMode.READ, 0, region * 2);
-    const scoreView = new Float32Array(readback.getMappedRange(0, region).slice(0));
-    const rowView = new Uint32Array(readback.getMappedRange(region, region).slice(0));
+    await tracedGpuWait(readback.mapAsync(GPUMapMode.READ, 0, region * 2));
+    // Merge straight off the mapped GPU memory — no copies (mergePartials'
+    // output holds no references into the mapped range).
+    const mapped = readback.getMappedRange(0, region * 2);
+    const scoreView = new Float32Array(mapped, 0, pairs);
+    const rowView = new Uint32Array(mapped, region, pairs);
+    const hits = mergePartials(scoreView, rowView, pairs, n, k);
     readback.unmap();
-
-    return mergePartials(scoreView, rowView, pairs, n, k);
+    return hits;
   }
 
   destroy(): void {

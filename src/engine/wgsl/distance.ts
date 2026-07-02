@@ -56,6 +56,11 @@ export function buildDistanceShader(key: DistanceShaderKey): string {
     ? '@group(0) @binding(4) var<storage, read> candidates: array<u32>;'
     : '';
   const rowExpr = indexed ? 'candidates[gid.x]' : 'gid.x';
+  // vec4-aligned dims (384/768/1024, …) take the vectorized variant: corpus and
+  // query bind as array<vec4<f32>>, so each iteration is one 16-byte load per
+  // buffer instead of four scalar loads. Row byte layout is identical — only the
+  // binding's element type changes (buffer sizes are 16-byte multiples here).
+  if (tail === 0) return buildDistanceShaderVec4(key, m, vecChunks, candidateBinding, rowExpr);
   // Chunked corpus (§NFR-10): the bound `corpus` holds one chunk starting at
   // local row 0. Flat mode writes the *global* score slot params.y (chunk base
   // row) + gid.x. Indexed (IVF) mode buckets candidates by chunk and scores each
@@ -112,6 +117,61 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
   if (gid.x >= params.x) { return; }
   let row = ${rowExpr};
   scores[${scoreSlot}] = score_row(row * DIM);
+}
+`;
+}
+
+/** Vectorized variant for dim % 4 == 0: vec4 loads for corpus, query and shared memory. */
+function buildDistanceShaderVec4(
+  key: DistanceShaderKey,
+  m: { acc: string; finalize: string; init: string },
+  vecChunks: number,
+  candidateBinding: string,
+  rowExpr: string,
+): string {
+  const { dim, metric, workgroupSize, indexed = false } = key;
+  const scoreSlot = indexed ? 'params.z + gid.x' : 'params.y + gid.x';
+
+  return /* wgsl */ `
+// AUTO-GENERATED (vec4) for dim=${dim}, metric=${metric}, wg=${workgroupSize}
+override WG: u32 = ${workgroupSize}u;
+
+@group(0) @binding(0) var<storage, read>        corpus: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read>        query:  array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write>  scores: array<f32>;
+@group(0) @binding(3) var<uniform>              params: vec4<u32>; // x = count (rows this dispatch), y = score base row (chunk offset)
+${candidateBinding}
+
+var<workgroup> q_shared: array<vec4<f32>, ${vecChunks}>;
+
+fn score_row(base: u32) -> f32 {
+  ${m.init}
+  var i: u32 = 0u;
+  loop {
+    if (i >= ${vecChunks}u) { break; }
+    let c = corpus[base + i];
+    let q = q_shared[i];
+    ${m.acc}
+    i = i + 1u;
+  }
+  ${m.finalize}
+}
+
+@compute @workgroup_size(WG)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(local_invocation_id)  lid: vec3<u32>) {
+  // 1) cooperatively stage the query (as vec4s) into shared memory.
+  var k: u32 = lid.x;
+  loop {
+    if (k >= ${vecChunks}u) { break; }
+    q_shared[k] = query[k];
+    k = k + WG;
+  }
+  workgroupBarrier();
+
+  if (gid.x >= params.x) { return; }
+  let row = ${rowExpr};
+  scores[${scoreSlot}] = score_row(row * ${vecChunks}u);
 }
 `;
 }

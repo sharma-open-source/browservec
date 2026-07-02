@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — Benchmark Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem auto; max-width: 1080px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  .subtitle { color: #666; margin-top: 0; font-size: .9rem; }
+  .note { color: #888; font-size: .8rem; background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: .6rem .8rem; margin: .75rem 0; }
+  .controls { display: flex; gap: .75rem; margin: 1rem 0; flex-wrap: wrap; align-items: end; }
+  .controls label { font-size: .85rem; display: flex; flex-direction: column; gap: .2rem; }
+  .controls input, .controls select { padding: .4rem; border: 1px solid #ddd; border-radius: 4px; font: inherit; font-size: .85rem; }
+  .controls button { padding: .5rem 1rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font: inherit; font-weight: 600; }
+  .controls button:disabled { opacity: .5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; margin: .75rem 0; }
+  th, td { padding: .5rem .6rem; text-align: right; border-bottom: 1px solid #eee; }
+  th { text-align: right; background: #fafafa; font-weight: 600; color: #555; }
+  td:first-child, th:first-child { text-align: left; }
+  .good { color: #2e7d32; font-weight: 600; }
+  .warn { color: #e65100; }
+  .bad { color: #d32f2f; }
+  .bar-cell { display: flex; align-items: center; gap: .4rem; justify-content: flex-end; }
+  .bar { height: 12px; border-radius: 3px; }
+  .chart { margin: .5rem 0 1.5rem; }
+  .chart .row { display: flex; align-items: center; margin: 3px 0; font-size: .78rem; }
+  .chart .row .lbl { width: 220px; text-align: right; padding-right: .5rem; color: #555; flex-shrink: 0; }
+  .chart .row .bar-wrap { flex: 1; }
+  pre { background: #111; color: #b9f; padding: .75rem; border-radius: 6px; overflow: auto; font-size: .78rem; max-height: 320px; }
+  .log-area { margin-top: 1rem; }
+  .log-area summary { cursor: pointer; font-weight: 600; color: #555; font-size: .85rem; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>Benchmark Dashboard</h1>
+<p class="subtitle">BrowserVec vs. hnswlib-wasm vs. Vectorious (BLAS brute force) vs. naive JS brute force —
+latency, recall, memory, and ingest speed, all running live in this tab on synthetic clustered vectors.</p>
+
+<div class="note">
+  Recall is measured against the <strong>naive JS brute force</strong> engine's results, since it's
+  an exact (not approximate) scan — same reference the other engines are checked against. BrowserVec's
+  default flat index is also exact, so it should track ~100% recall; the quantized BrowserVec rows and
+  hnswlib-wasm are approximate — quant recall depends on the code width + exact re-rank, HNSW recall on
+  <code>efSearch</code> (and the <code>efConstruction</code>/<code>M</code> build parameters).
+  <code>efSearch</code> is clamped to ≥ k; hnswlib's own default (~10) is below k=20 and craters recall.
+  Memory is a computed bytes-per-row estimate of the <em>scan corpus</em> each engine reads per query
+  (fp32 vectors, packed quant codes + scales, or vectors + a rough graph-overhead term for hnswlib-wasm),
+  not a measured heap snapshot — WASM/JS heap introspection isn't reliable across browsers. BrowserVec's
+  quantized modes also keep an fp32 copy CPU-side for the exact re-rank and persistence, like every
+  engine here keeps its source data.
+  <br /><br />
+  <strong>Time breakdown:</strong> for BrowserVec, <em>GPU</em> is the measured wait on submitted GPU
+  work (kernel execution + queue scheduling), <em>Transfer</em> is a separately measured
+  readback/map round-trip cost on the same device (fixed sync overhead — the score readback itself is
+  small), and <em>CPU</em> is everything else (prep, candidate gather, exact re-rank, top-k merge).
+  "GPU busy" is the fraction of query wall time spent waiting on the GPU — browsers expose no true
+  hardware-utilization counter, so treat it as attribution, not occupancy. WASM/JS engines are 100% CPU.
+  <br /><br />
+  <strong>Why no usearch or faiss?</strong> Neither ships a browser build on npm — <code>usearch</code>
+  and <code>faiss-node</code> are native Node.js addons (node-gyp/NAPI), so they can't run in a web page.
+  The WASM engines that do run in-browser are represented by hnswlib-wasm and voy-search (Rust→WASM
+  kd-tree), plus Orama as a pure-JS vector search. voy-search is skipped on very large corpus×dim
+  configurations — its JSON-based ingest is not built for that scale.
+</div>
+
+<div class="controls">
+  <label>Corpus size
+    <select id="corpusSize">
+      <option value="1000">1,000</option>
+      <option value="5000" selected>5,000</option>
+      <option value="20000">20,000</option>
+      <option value="50000">50,000</option>
+    </select>
+  </label>
+  <label>Dimensions
+    <select id="dimension">
+      <option value="64">64</option>
+      <option value="128" selected>128</option>
+      <option value="384">384 (text)</option>
+      <option value="768">768</option>
+    </select>
+  </label>
+  <label>k (neighbors)
+    <select id="kVal">
+      <option value="10" selected>10</option>
+      <option value="20">20</option>
+    </select>
+  </label>
+  <label>Query count
+    <select id="queryCount">
+      <option value="20">20</option>
+      <option value="50" selected>50</option>
+      <option value="100">100</option>
+    </select>
+  </label>
+  <label>HNSW efConstruction / M
+    <select id="hnswParams">
+      <option value="100,12">100 / 12 (fast build, lower recall)</option>
+      <option value="200,16" selected>200 / 16 (default)</option>
+      <option value="400,32">400 / 32 (slow build, higher recall)</option>
+    </select>
+  </label>
+  <label>HNSW efSearch
+    <select id="hnswEfSearch">
+      <option value="16">16 (fast, lower recall)</option>
+      <option value="64" selected>64 (balanced)</option>
+      <option value="128">128 (slower, higher recall)</option>
+    </select>
+  </label>
+  <button id="runBtn">Run Benchmark</button>
+</div>
+<div class="note" id="configNote"></div>
+
+<table id="resultsTable">
+  <thead>
+    <tr>
+      <th>Engine</th>
+      <th>Ingest</th>
+      <th>Avg latency</th>
+      <th>QPS</th>
+      <th>CPU</th>
+      <th>GPU</th>
+      <th>Transfer</th>
+      <th>Recall@k</th>
+      <th>Memory (est.)</th>
+    </tr>
+  </thead>
+  <tbody id="resultsBody"><tr><td colspan="9" style="text-align:center;color:#999;">Run the benchmark to see results.</td></tr></tbody>
+</table>
+
+<div class="chart" id="latencyChart"></div>
+<div class="chart" id="breakdownChart"></div>
+<div class="chart" id="gpuBusyChart"></div>
+<div class="chart" id="memoryChart"></div>
+<div class="chart" id="recallChart"></div>
+
+<details class="log-area">
+  <summary>Detailed log</summary>
+  <pre id="log">ready.</pre>
+</details>
+
+<script type="module">
+import {
+  standardEngines, runEngine, recallAgainst, makeNaiveBruteForceEngine,
+  renderResultsTable, renderStandardCharts,
+} from './lib/engines.js';
+
+const $ = (id) => document.getElementById(id);
+const log = (msg, cls = '') => { $('log').innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`; };
+
+// ---- Synthetic clustered corpus ----
+// Uniform-random vectors are a worst case for approximate search (no structure
+// to exploit), so — like the IVF example/demo — we generate clustered vectors:
+// real embeddings cluster, and recall differences between exact and approximate
+// engines only show up on data with actual structure.
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function normalize(v) {
+  let sum = 0;
+  for (let i = 0; i < v.length; i++) sum += v[i] * v[i];
+  const norm = Math.sqrt(sum) || 1;
+  for (let i = 0; i < v.length; i++) v[i] /= norm;
+  return v;
+}
+
+function generateCorpus(n, dim, seed = 42) {
+  const rand = mulberry32(seed);
+  const numClusters = Math.max(4, Math.round(Math.sqrt(n) / 2));
+  const centers = Array.from({ length: numClusters }, () => {
+    const c = new Float32Array(dim);
+    for (let d = 0; d < dim; d++) c[d] = (rand() * 2 - 1);
+    return normalize(c);
+  });
+
+  const vectors = [];
+  const ids = [];
+  for (let i = 0; i < n; i++) {
+    const center = centers[i % numClusters];
+    const v = new Float32Array(dim);
+    for (let d = 0; d < dim; d++) v[d] = center[d] + (rand() * 2 - 1) * 0.35;
+    vectors.push(normalize(v));
+    ids.push(`row-${i}`);
+  }
+  return { vectors, ids };
+}
+
+async function runAll() {
+  const n = parseInt($('corpusSize').value);
+  const dim = parseInt($('dimension').value);
+  const k = parseInt($('kVal').value);
+  const queryCount = parseInt($('queryCount').value);
+  const [efConstruction, m] = $('hnswParams').value.split(',').map(Number);
+  // efSearch must be ≥ k or HNSW's candidate list can't hold k results.
+  const efSearch = Math.max(parseInt($('hnswEfSearch').value), k);
+
+  $('runBtn').disabled = true;
+  $('log').textContent = '';
+  $('resultsBody').innerHTML = `<tr><td colspan="9" style="text-align:center;color:#999;">Running…</td></tr>`;
+
+  log(`Generating ${n.toLocaleString()} clustered ${dim}-dim vectors...`);
+  const corpus = generateCorpus(n, dim);
+  const rand = mulberry32(1337);
+  const queries = Array.from({ length: queryCount }, () => corpus.vectors[Math.floor(rand() * n)]);
+
+  // Ground truth from the naive exact brute-force engine — its own results
+  // double as the "reference" row (recall trivially 100% against itself).
+  const gtRun = await runEngine(makeNaiveBruteForceEngine(dim), corpus, queries, k, log);
+  const groundTruth = gtRun.perQueryIds.map((ids) => new Set(ids));
+
+  const engines = standardEngines(dim, n, { efConstruction, m, efSearch }, log);
+
+  const results = [{ ...gtRun, recall: 1 }];
+  for (const engine of engines) {
+    try {
+      const r = await runEngine(engine, corpus, queries, k, log);
+      const recall = recallAgainst(r.perQueryIds, groundTruth, k);
+      log(`  recall@${k} vs. ground truth = ${(recall * 100).toFixed(1)}%`);
+      results.push({ ...r, recall });
+    } catch (e) {
+      log(`ERROR on ${engine.name}: ${e.message}`, 'bad');
+      console.error(e);
+    }
+  }
+
+  renderResultsTable($('resultsBody'), results);
+  renderStandardCharts(
+    { latency: 'latencyChart', breakdown: 'breakdownChart', gpuBusy: 'gpuBusyChart', memory: 'memoryChart', recall: 'recallChart' },
+    results,
+  );
+  $('configNote').textContent =
+    `${n.toLocaleString()} rows × ${dim} dim, ${queryCount} queries, k=${k}. ` +
+    `Ground truth: naive JS brute force (exact). HNSW: efConstruction=${efConstruction}, M=${m}, efSearch=${efSearch}.`;
+  $('runBtn').disabled = false;
+}
+
+function updateConfigNote() {
+  const n = parseInt($('corpusSize').value);
+  const dim = parseInt($('dimension').value);
+  $('configNote').textContent = `${n.toLocaleString()} rows × ${dim} dim — click "Run Benchmark" to compare all engines.`;
+}
+$('corpusSize').onchange = updateConfigNote;
+$('dimension').onchange = updateConfigNote;
+updateConfigNote();
+
+$('runBtn').onclick = runAll;
+
+log('Ready. Configure and click "Run Benchmark".');
+</script>
+</body>
+</html>

@@ -29,6 +29,13 @@ export async function transformersEmbedder(options: TransformersEmbedderOptions 
   // neither the library nor the model is pulled into the core bundle.
   const spec = '@xenova/transformers';
   const mod: any = await import(/* @vite-ignore */ spec as string);
+  // transformers.js defaults env.allowLocalModels to true, so it probes a
+  // local `/models/...` path before falling back to the Hub. This library
+  // never ships local model files, and many dev/static servers answer a
+  // missing path with an HTML fallback page rather than a 404 — which then
+  // fails JSON parsing with a confusing "Unexpected token '<'" error instead
+  // of a clear 404. Going straight to the Hub avoids that path entirely.
+  mod.env.allowLocalModels = false;
   const extractor = await mod.pipeline('feature-extraction', model, {
     device: options.device,
     progress_callback: options.onProgress,

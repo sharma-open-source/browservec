@@ -32,6 +32,7 @@ import { QuantIndex } from './index/quant.js';
 import { IVFIndex } from './index/ivf.js';
 import { IVFQuantIndex } from './index/ivfquant.js';
 import { Store, normalizeInPlace } from './store/store.js';
+import { queryTrace } from './engine/profile.js';
 import { selectBackend, type PersistenceBackend } from './persist/backend.js';
 import { serialize, deserialize, type Snapshot } from './persist/format.js';
 import { encryptSnapshot, decryptSnapshot, isEncrypted } from './persist/crypto.js';
@@ -173,6 +174,7 @@ function indexFactory(
 
 export class BrowserVec {
   private lastQueryMs: number | undefined;
+  private lastQueryGpuMs: number | undefined;
   private backend: PersistenceBackend | undefined;
   private persistName: string | undefined;
   private persistPassphrase: string | undefined;
@@ -330,6 +332,7 @@ export class BrowserVec {
     const total = this.index.size;
     const kEff = Math.min(total, k + deleted);
 
+    queryTrace.reset();
     const start = performance.now();
     let hits: FlatHit[];
     if (this.quantBits > 0) {
@@ -341,6 +344,7 @@ export class BrowserVec {
       hits = await this.index.query(q, kEff);
     }
     this.lastQueryMs = performance.now() - start;
+    this.lastQueryGpuMs = queryTrace.gpuWaitMs;
 
     const results: QueryResult[] = [];
     for (const h of hits) {
@@ -419,13 +423,10 @@ export class BrowserVec {
    * Valid for cosine/dot (the only quantized metrics): exact score = dot product.
    */
   private rerankExact(q: Float32Array, candidates: FlatHit[], k: number): FlatHit[] {
-    const dim = this.store.dimension;
     const scores = new Float32Array(candidates.length);
     for (let c = 0; c < candidates.length; c++) {
-      const vec = this.store.vectorAt(candidates[c]!.row)!;
-      let acc = 0;
-      for (let i = 0; i < dim; i++) acc += vec[i]! * q[i]!;
-      scores[c] = acc;
+      // Score straight from the store's packed buffer — no per-candidate copy.
+      scores[c] = this.store.dotRow(candidates[c]!.row, q);
     }
     // topK returns rows as indices into `scores`; remap to original corpus rows.
     return topK(scores, candidates.length, k).map((h) => ({
@@ -529,7 +530,12 @@ export class BrowserVec {
       quantBits: this.quantBits,
     };
     if (this.store.deletedCount > 0) out.deleted = this.store.deletedCount;
-    if (this.lastQueryMs !== undefined) out.lastQueryMs = this.lastQueryMs;
+    if (this.lastQueryMs !== undefined) {
+      out.lastQueryMs = this.lastQueryMs;
+      const gpu = Math.min(this.lastQueryGpuMs ?? 0, this.lastQueryMs);
+      out.lastQueryGpuMs = gpu;
+      out.lastQueryCpuMs = this.lastQueryMs - gpu;
+    }
     if (this.backend) out.persist = this.backend.kind;
     if ('nlist' in this.index) {
       const nlist = (this.index as { nlist: number }).nlist;

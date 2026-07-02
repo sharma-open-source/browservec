@@ -32,13 +32,13 @@ export function buildQuant1Shader(key: Quant1ShaderKey): string {
 override WG: u32 = ${workgroupSize}u;
 
 @group(0) @binding(0) var<storage, read>       corpus: array<u32>;  // ${words} words/row (32 sign bits each)
-@group(0) @binding(1) var<storage, read>       query:  array<f32>;  // rotated, ${paddedDim} long
+@group(0) @binding(1) var<storage, read>       query:  array<vec4<f32>>;  // rotated, ${paddedDim / 4} vec4s
 @group(0) @binding(2) var<storage, read_write> scores: array<f32>;
 @group(0) @binding(3) var<storage, read>       scales: array<f32>;  // per row (mean|coord|)
 @group(0) @binding(4) var<uniform>             params: vec4<u32>;   // x = count, y = codes/scale base row, z = score output offset (indexed)
 ${candidateBinding}
 
-var<workgroup> q_shared: array<f32, ${paddedDim}>;
+var<workgroup> q_shared: array<vec4<f32>, ${paddedDim / 4}>;
 
 // Sign of bit \`shift\` in \`w\`: +1.0 when set, -1.0 when clear.
 fn sgn(w: u32, shift: u32) -> f32 {
@@ -51,16 +51,14 @@ fn score_row(wordBase: u32, scale: f32) -> f32 {
   loop {
     if (g >= ${words}u) { break; }
     let w = corpus[wordBase + g];
-    let o = g * 32u;
+    let o = g * 8u;
     // 32 sign bits → eight vec4 dot products against the staged fp32 query.
     var s: u32 = 0u;
     loop {
       if (s >= 8u) { break; }
       let sh = s * 4u;
-      let base = o + sh;
       let v = vec4<f32>(sgn(w, sh), sgn(w, sh + 1u), sgn(w, sh + 2u), sgn(w, sh + 3u));
-      let q = vec4<f32>(q_shared[base], q_shared[base + 1u], q_shared[base + 2u], q_shared[base + 3u]);
-      acc = dot(v, q) + acc;
+      acc = dot(v, q_shared[o + s]) + acc;
       s = s + 1u;
     }
     g = g + 1u;
@@ -73,7 +71,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(local_invocation_id)  lid: vec3<u32>) {
   var k: u32 = lid.x;
   loop {
-    if (k >= ${paddedDim}u) { break; }
+    if (k >= ${paddedDim / 4}u) { break; }
     q_shared[k] = query[k];
     k = k + WG;
   }

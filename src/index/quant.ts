@@ -11,6 +11,7 @@ import { buildQuantShader } from '../engine/wgsl/distanceQ8.js';
 import { buildQuant4Shader } from '../engine/wgsl/distanceQ4.js';
 import { buildQuant1Shader } from '../engine/wgsl/distanceQ1.js';
 import { createQuantEncoder, type QuantEncoder, type IngestMode } from '../quant/encoder.js';
+import { tracedGpuWait } from '../engine/profile.js';
 import { topK, type FlatHit } from './flat.js';
 import { GpuTopK } from './gpuTopk.js';
 
@@ -35,6 +36,7 @@ export class QuantIndex {
   private readback: GPUBuffer | null = null;
   private scoreCap = 0;
   private gpuTopk: GpuTopK | null = null;
+  private readonly paramsScratch = new Uint32Array(4);
 
   constructor(
     private readonly ctx: DeviceContext,
@@ -171,7 +173,9 @@ export class QuantIndex {
     // globally at params.y (chunk base) + gid.x. params is rewritten per chunk,
     // so each chunk is its own submit (the queue preserves write/submit order).
     this.codes.eachChunk((buffer, baseRow, rowCount) => {
-      device.queue.writeBuffer(this.paramsBuf, 0, new Uint32Array([rowCount, baseRow, 0, 0]));
+      this.paramsScratch[0] = rowCount;
+      this.paramsScratch[1] = baseRow;
+      device.queue.writeBuffer(this.paramsBuf, 0, this.paramsScratch);
       const bind = device.createBindGroup({
         layout: this.pipeline.getBindGroupLayout(0),
         entries: [
@@ -204,10 +208,13 @@ export class QuantIndex {
     enc.copyBufferToBuffer(sp.score, 0, sp.readback, 0, this.rows * 4);
     device.queue.submit([enc.finish()]);
 
-    await sp.readback.mapAsync(GPUMapMode.READ, 0, this.rows * 4);
-    const scores = new Float32Array(sp.readback.getMappedRange(0, this.rows * 4).slice(0));
+    await tracedGpuWait(sp.readback.mapAsync(GPUMapMode.READ, 0, this.rows * 4));
+    // Select straight off the mapped GPU memory — no O(N) copy (topK's output
+    // holds no references into the mapped range).
+    const scores = new Float32Array(sp.readback.getMappedRange(0, this.rows * 4));
+    const hits = topK(scores, this.rows, k);
     sp.readback.unmap();
-    return topK(scores, this.rows, k);
+    return hits;
   }
 
   destroy(): void {

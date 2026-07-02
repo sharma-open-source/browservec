@@ -127,12 +127,26 @@ export class CpuIndex implements VectorIndex {
   }
 
   // Negative squared L2, matching the GPU kernel's "higher = closer" convention.
+  // Unrolled ×4 like scoreDot so the accumulators stay in registers.
   private scoreL2(q: Float32Array, out: Float32Array): void {
     const { dim, data, rows } = this;
+    const tail = dim & ~3;
     for (let r = 0; r < rows; r++) {
       const base = r * dim;
-      let acc = 0;
-      for (let i = 0; i < dim; i++) {
+      let a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+      let i = 0;
+      for (; i < tail; i += 4) {
+        const d0 = data[base + i]! - q[i]!;
+        const d1 = data[base + i + 1]! - q[i + 1]!;
+        const d2 = data[base + i + 2]! - q[i + 2]!;
+        const d3 = data[base + i + 3]! - q[i + 3]!;
+        a0 += d0 * d0;
+        a1 += d1 * d1;
+        a2 += d2 * d2;
+        a3 += d3 * d3;
+      }
+      let acc = a0 + a1 + a2 + a3;
+      for (; i < dim; i++) {
         const d = data[base + i]! - q[i]!;
         acc += d * d;
       }

@@ -37,8 +37,9 @@ export function fwht(a: Float32Array): void {
 
 export class Rotator {
   readonly paddedDim: number;
-  private readonly signs: Float32Array[]; // one ±1 vector per round
-  private readonly invScale: number; // 1/sqrt(P) applied once per round
+  // One ±1/sqrt(P) vector per round: the FWHT is linear, so the orthonormal
+  // 1/sqrt(P) scale is pre-folded into the signs — one pass instead of two.
+  private readonly signs: Float32Array[];
 
   constructor(
     readonly dim: number,
@@ -46,11 +47,13 @@ export class Rotator {
     readonly rounds = 2,
   ) {
     this.paddedDim = padToPow2(dim);
-    this.invScale = 1 / Math.sqrt(this.paddedDim);
+    const invScale = 1 / Math.sqrt(this.paddedDim);
     this.signs = [];
     for (let r = 0; r < rounds; r++) {
       // Distinct seed per round so the rounds aren't identical.
-      this.signs.push(randomSigns(this.paddedDim, (seed ^ (0x9e3779b9 * (r + 1))) >>> 0));
+      const s = randomSigns(this.paddedDim, (seed ^ (0x9e3779b9 * (r + 1))) >>> 0);
+      for (let i = 0; i < s.length; i++) s[i]! *= invScale;
+      this.signs.push(s);
     }
   }
 
@@ -61,9 +64,8 @@ export class Rotator {
     dst.fill(0, src.length); // zero the padding tail
     for (let r = 0; r < this.rounds; r++) {
       const s = this.signs[r]!;
-      for (let i = 0; i < dst.length; i++) dst[i]! *= s[i]!;
+      for (let i = 0; i < dst.length; i++) dst[i]! *= s[i]!; // sign flip + 1/sqrt(P) in one pass
       fwht(dst);
-      for (let i = 0; i < dst.length; i++) dst[i]! *= this.invScale;
     }
   }
 

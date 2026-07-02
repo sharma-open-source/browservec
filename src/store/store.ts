@@ -106,6 +106,29 @@ export class Store {
     return this.raw.slice(off, off + this.dimension);
   }
 
+  /**
+   * Dot product of stored row `row` against `q`, read straight from the packed
+   * raw buffer — no per-row copy. Hot path of the exact re-rank. Unrolled ×4 so
+   * the JS engine keeps the accumulators in registers.
+   */
+  dotRow(row: number, q: Float32Array): number {
+    const dim = this.dimension;
+    const raw = this.raw;
+    const base = row * dim;
+    const vec = dim & ~3;
+    let a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+    let i = 0;
+    for (; i < vec; i += 4) {
+      a0 += raw[base + i]! * q[i]!;
+      a1 += raw[base + i + 1]! * q[i + 1]!;
+      a2 += raw[base + i + 2]! * q[i + 2]!;
+      a3 += raw[base + i + 3]! * q[i + 3]!;
+    }
+    let acc = a0 + a1 + a2 + a3;
+    for (; i < dim; i++) acc += raw[base + i]! * q[i]!;
+    return acc;
+  }
+
   /** Validate length and (optionally) L2-normalize, returning a fresh Float32Array. */
   prepare(vector: Vector): Float32Array {
     const v = vector instanceof Float32Array ? new Float32Array(vector) : Float32Array.from(vector);

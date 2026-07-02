@@ -178,6 +178,13 @@ export interface Stats {
   device: 'webgpu' | 'wasm';
   /** Wall-clock of the most recent query() in ms. */
   lastQueryMs?: number;
+  /**
+   * Of lastQueryMs: time spent awaiting GPU work — kernel execution + readback
+   * transfer + queue scheduling (see engine/profile.ts). 0 on the CPU fallback.
+   */
+  lastQueryGpuMs?: number;
+  /** Of lastQueryMs: JS-side time (prep, candidate gather, exact re-rank, top-k merge). */
+  lastQueryCpuMs?: number;
   /** Persistence backend in use, if configured. */
   persist?: 'opfs' | 'indexeddb';
   /** Quantization bit-width in use (0 = fp32). */

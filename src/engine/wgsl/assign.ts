@@ -16,6 +16,49 @@ export function buildAssignShader(key: AssignShaderKey): string {
   const vecChunks = Math.floor(dim / 4);
   const tail = dim % 4;
 
+  // vec4-aligned dims bind corpus/centroids as array<vec4<f32>> — one 16-byte
+  // load per buffer per iteration instead of four scalar loads (same byte layout).
+  if (tail === 0) {
+    return /* wgsl */ `
+// AUTO-GENERATED (vec4) assignment kernel for dim=${dim}, wg=${workgroupSize}
+override WG: u32 = ${workgroupSize}u;
+
+@group(0) @binding(0) var<storage, read>        corpus:    array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read>        centroids: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write>  cluster:   array<u32>;
+@group(0) @binding(3) var<uniform>              params:    vec4<u32>; // x = rows, y = nlist
+
+fn dot_centroid(row_base: u32, cen_base: u32) -> f32 {
+  var acc: f32 = 0.0;
+  var i: u32 = 0u;
+  loop {
+    if (i >= ${vecChunks}u) { break; }
+    acc = dot(corpus[row_base + i], centroids[cen_base + i]) + acc;
+    i = i + 1u;
+  }
+  return acc;
+}
+
+@compute @workgroup_size(WG)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let row = gid.x;
+  if (row >= params.x) { return; }
+  let row_base = row * ${vecChunks}u;
+
+  var best_c: u32 = 0u;
+  var best_s: f32 = -3.4e38;
+  var c: u32 = 0u;
+  loop {
+    if (c >= params.y) { break; }
+    let s = dot_centroid(row_base, c * ${vecChunks}u);
+    if (s > best_s) { best_s = s; best_c = c; }
+    c = c + 1u;
+  }
+  cluster[row] = best_c;
+}
+`;
+  }
+
   return /* wgsl */ `
 // AUTO-GENERATED assignment kernel for dim=${dim}, wg=${workgroupSize}
 override DIM: u32 = ${dim}u;
