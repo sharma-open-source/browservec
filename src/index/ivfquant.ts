@@ -22,6 +22,7 @@ import { buildQuant1AssignShader } from '../engine/wgsl/assignQ1.js';
 import { buildAssignShader } from '../engine/wgsl/assign.js';
 import { createQuantEncoder, type QuantEncoder, type IngestMode } from '../quant/encoder.js';
 import { createKMeansTrainer, type TrainMode } from './kmeansTrainer.js';
+import { tracedGpuWait } from '../engine/profile.js';
 import { topK, type FlatHit, type VectorIndex } from './flat.js';
 import { GpuTopK } from './gpuTopk.js';
 import type { IVFParams } from './ivf.js';
@@ -425,8 +426,7 @@ export class IVFQuantIndex implements VectorIndex {
       return (await this.gpuTopk.query(sp.scores, total, k)).map(remap);
     }
 
-    const scores = await this.readbackScores(sp, total);
-    return topK(scores, total, k).map(remap);
+    return (await this.readbackTopK(sp, total, k)).map(remap);
   }
 
   private resolveNprobe(): number {
@@ -436,14 +436,19 @@ export class IVFQuantIndex implements VectorIndex {
   }
 
   private pickProbes(rq: Float32Array, nprobe: number): number[] {
-    const pd = this.paddedDim;
+    const pd = this.paddedDim; // always a multiple of 4 (power of two ≥ 4)
     const centroids = this.centroids!;
     const scores = new Float32Array(this.nlistActual);
     for (let c = 0; c < this.nlistActual; c++) {
       const base = c * pd;
-      let acc = 0;
-      for (let i = 0; i < pd; i++) acc += centroids[base + i]! * rq[i]!;
-      scores[c] = acc;
+      let a0 = 0, a1 = 0, a2 = 0, a3 = 0; // unrolled ×4: accumulators stay in registers
+      for (let i = 0; i < pd; i += 4) {
+        a0 += centroids[base + i]! * rq[i]!;
+        a1 += centroids[base + i + 1]! * rq[i + 1]!;
+        a2 += centroids[base + i + 2]! * rq[i + 2]!;
+        a3 += centroids[base + i + 3]! * rq[i + 3]!;
+      }
+      scores[c] = a0 + a1 + a2 + a3;
     }
     return topK(scores, this.nlistActual, nprobe).map((h) => h.row);
   }
@@ -456,7 +461,10 @@ export class IVFQuantIndex implements VectorIndex {
     const out = new Uint32Array(total);
     let w = 0;
     for (const c of probes) {
-      for (let i = offset[c]!; i < offset[c + 1]!; i++) out[w++] = listRows[i]!;
+      const start = offset[c]!;
+      const end = offset[c + 1]!;
+      out.set(listRows.subarray(start, end), w); // bulk memcpy per list
+      w += end - start;
     }
     return out;
   }
@@ -497,6 +505,36 @@ export class IVFQuantIndex implements VectorIndex {
     const { device } = this.ctx;
     const total = candidates.length;
     const rpc = this.codes.rowsPerChunk;
+
+    // Fast path — single-chunk codes (the common case): candidates are already
+    // local rows of chunk 0 and the scan output is in candidate order, so skip
+    // the bucketing entirely and upload the candidate list as-is.
+    if (this.codes.chunkCount === 1) {
+      const candBuf = this.ensureCandidateBuf(total);
+      const sp = this.ensureScores(total);
+      device.queue.writeBuffer(this.queryBuf, 0, rq);
+      device.queue.writeBuffer(candBuf, 0, candidates, 0, total);
+      device.queue.writeBuffer(this.paramsBuf, 0, new Uint32Array([total, 0, 0, 0]));
+      const bind = device.createBindGroup({
+        layout: this.scanPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.codes.bufferAt(0) } },
+          { binding: 1, resource: { buffer: this.queryBuf } },
+          { binding: 2, resource: { buffer: sp.scores } },
+          { binding: 3, resource: { buffer: this.scales! } },
+          { binding: 4, resource: { buffer: this.paramsBuf } },
+          { binding: 5, resource: { buffer: candBuf } },
+        ],
+      });
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(this.scanPipeline);
+      pass.setBindGroup(0, bind);
+      pass.dispatchWorkgroups(Math.ceil(total / WORKGROUP_SIZE));
+      pass.end();
+      device.queue.submit([enc.finish()]);
+      return { sp, order: candidates };
+    }
 
     // Bucket candidates by chunk (any order; we track their global ids in `order`).
     const buckets = new Map<number, number[]>();
@@ -552,16 +590,17 @@ export class IVFQuantIndex implements VectorIndex {
     return { sp, order };
   }
 
-  /** Full copy-back of the candidate scores for the CPU top-k path (small sets). */
-  private async readbackScores(sp: ScorePair, n: number): Promise<Float32Array> {
+  /** Copy-back + CPU top-k for small candidate sets, selecting straight off the mapped range. */
+  private async readbackTopK(sp: ScorePair, n: number, k: number): Promise<FlatHit[]> {
     const { device } = this.ctx;
     const enc = device.createCommandEncoder();
     enc.copyBufferToBuffer(sp.scores, 0, sp.readback, 0, n * 4);
     device.queue.submit([enc.finish()]);
-    await sp.readback.mapAsync(GPUMapMode.READ, 0, n * 4);
-    const out = new Float32Array(sp.readback.getMappedRange(0, n * 4).slice(0));
+    await tracedGpuWait(sp.readback.mapAsync(GPUMapMode.READ, 0, n * 4));
+    const scores = new Float32Array(sp.readback.getMappedRange(0, n * 4));
+    const hits = topK(scores, n, k); // holds no references into the mapped range
     sp.readback.unmap();
-    return out;
+    return hits;
   }
 
   destroy(): void {

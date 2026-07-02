@@ -42,11 +42,28 @@ latency, recall, memory, and ingest speed, all running live in this tab on synth
 <div class="note">
   Recall is measured against the <strong>naive JS brute force</strong> engine's results, since it's
   an exact (not approximate) scan — same reference the other engines are checked against. BrowserVec's
-  default flat index is also exact, so it should track ~100% recall; hnswlib-wasm is the only genuinely
-  approximate engine here, so its recall depends on the <code>ef</code>/<code>M</code> build parameters below.
-  Memory is a computed bytes-per-row estimate (raw vector storage, plus a rough graph-overhead term for
-  hnswlib-wasm), not a measured heap snapshot — WASM/JS heap introspection isn't reliable enough across
-  browsers to report as ground truth.
+  default flat index is also exact, so it should track ~100% recall; the quantized BrowserVec rows and
+  hnswlib-wasm are approximate — quant recall depends on the code width + exact re-rank, HNSW recall on
+  <code>efSearch</code> (and the <code>efConstruction</code>/<code>M</code> build parameters).
+  <code>efSearch</code> is clamped to ≥ k; hnswlib's own default (~10) is below k=20 and craters recall.
+  Memory is a computed bytes-per-row estimate of the <em>scan corpus</em> each engine reads per query
+  (fp32 vectors, packed quant codes + scales, or vectors + a rough graph-overhead term for hnswlib-wasm),
+  not a measured heap snapshot — WASM/JS heap introspection isn't reliable across browsers. BrowserVec's
+  quantized modes also keep an fp32 copy CPU-side for the exact re-rank and persistence, like every
+  engine here keeps its source data.
+  <br /><br />
+  <strong>Time breakdown:</strong> for BrowserVec, <em>GPU</em> is the measured wait on submitted GPU
+  work (kernel execution + queue scheduling), <em>Transfer</em> is a separately measured
+  readback/map round-trip cost on the same device (fixed sync overhead — the score readback itself is
+  small), and <em>CPU</em> is everything else (prep, candidate gather, exact re-rank, top-k merge).
+  "GPU busy" is the fraction of query wall time spent waiting on the GPU — browsers expose no true
+  hardware-utilization counter, so treat it as attribution, not occupancy. WASM/JS engines are 100% CPU.
+  <br /><br />
+  <strong>Why no usearch or faiss?</strong> Neither ships a browser build on npm — <code>usearch</code>
+  and <code>faiss-node</code> are native Node.js addons (node-gyp/NAPI), so they can't run in a web page.
+  The WASM engines that do run in-browser are represented by hnswlib-wasm and voy-search (Rust→WASM
+  kd-tree), plus Orama as a pure-JS vector search. voy-search is skipped on very large corpus×dim
+  configurations — its JSON-based ingest is not built for that scale.
 </div>
 
 <div class="controls">
@@ -86,6 +103,13 @@ latency, recall, memory, and ingest speed, all running live in this tab on synth
       <option value="400,32">400 / 32 (slow build, higher recall)</option>
     </select>
   </label>
+  <label>HNSW efSearch
+    <select id="hnswEfSearch">
+      <option value="16">16 (fast, lower recall)</option>
+      <option value="64" selected>64 (balanced)</option>
+      <option value="128">128 (slower, higher recall)</option>
+    </select>
+  </label>
   <button id="runBtn">Run Benchmark</button>
 </div>
 <div class="note" id="configNote"></div>
@@ -95,16 +119,22 @@ latency, recall, memory, and ingest speed, all running live in this tab on synth
     <tr>
       <th>Engine</th>
       <th>Ingest</th>
-      <th>Avg query latency</th>
-      <th>Queries/sec</th>
+      <th>Avg latency</th>
+      <th>QPS</th>
+      <th>CPU</th>
+      <th>GPU</th>
+      <th>Transfer</th>
       <th>Recall@k</th>
       <th>Memory (est.)</th>
     </tr>
   </thead>
-  <tbody id="resultsBody"><tr><td colspan="6" style="text-align:center;color:#999;">Run the benchmark to see results.</td></tr></tbody>
+  <tbody id="resultsBody"><tr><td colspan="9" style="text-align:center;color:#999;">Run the benchmark to see results.</td></tr></tbody>
 </table>
 
 <div class="chart" id="latencyChart"></div>
+<div class="chart" id="breakdownChart"></div>
+<div class="chart" id="gpuBusyChart"></div>
+<div class="chart" id="memoryChart"></div>
 <div class="chart" id="recallChart"></div>
 
 <details class="log-area">
@@ -116,6 +146,9 @@ latency, recall, memory, and ingest speed, all running live in this tab on synth
 import { BrowserVec } from '../src/index.ts';
 import { loadHnswlib } from 'hnswlib-wasm';
 import { array as vArray, dot as vDot } from 'vectorious';
+import { create as oramaCreate, insertMultiple as oramaInsertMultiple, search as oramaSearch } from '@orama/orama';
+import * as voyBg from 'voy-search/voy_search_bg.js';
+import voyWasmUrl from 'voy-search/voy_search_bg.wasm?url';
 
 const $ = (id) => document.getElementById(id);
 const log = (msg, cls = '') => { $('log').innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`; };
@@ -165,42 +198,223 @@ function generateCorpus(n, dim, seed = 42) {
 
 // ---- Engine adapters ----
 // Every engine exposes the same shape so the runner doesn't special-case any
-// of them: build(vectors, ids) -> {ms}, query(vec, k) -> {ids, ms}, memoryBytes(), destroy().
+// of them: build(vectors, ids) -> {ms}, query(vec, k) -> {ids, ms, cpuMs?, gpuMs?},
+// memoryBytes(), destroy(); optionally transferEstimateMs() (GPU engines only).
+
+// The dashboard owns the GPU device for BrowserVec engines (BrowserVec accepts
+// an injected device) so it can measure a raw readback round-trip on the SAME
+// device — that's the "Transfer" column. Mirrors the library's own limit requests.
+async function createBenchDevice() {
+  if (!navigator.gpu) return null;
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) return null;
+  const want = {
+    maxStorageBufferBindingSize: 1 << 30,
+    maxBufferSize: 1 << 30,
+    maxComputeWorkgroupStorageSize: 16384,
+    maxComputeInvocationsPerWorkgroup: 256,
+  };
+  const requiredLimits = {};
+  for (const [key, v] of Object.entries(want)) {
+    const cap = adapter.limits[key];
+    if (typeof cap === 'number') requiredLimits[key] = Math.min(v, cap);
+  }
+  return adapter.requestDevice({ requiredLimits });
+}
+
+// Average copy+map round-trip on an idle queue: the fixed synchronization cost
+// every GPU query pays to get results back to JS. Score readbacks are small
+// (top-k partials), so latency, not bandwidth, dominates transfer.
+async function measureTransferMs(device, bytes = 4096, iters = 12) {
+  const src = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  let total = 0;
+  for (let i = 0; i < iters; i++) {
+    const t0 = performance.now();
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(src, 0, rb, 0, bytes);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    rb.unmap();
+    if (i >= 2) total += performance.now() - t0; // first two are warm-up
+  }
+  src.destroy();
+  rb.destroy();
+  return total / (iters - 2);
+}
+
+// Shared query wrapper: wall time from the adapter, CPU/GPU split from
+// BrowserVec's own stats (see src/engine/profile.ts).
+function browserVecQuery(db) {
+  return async (q, k) => {
+    const t0 = performance.now();
+    const hits = await db.query(q, { k });
+    const ms = performance.now() - t0;
+    const s = db.stats();
+    return { ids: hits.map((h) => h.id), ms, cpuMs: s.lastQueryCpuMs ?? ms, gpuMs: s.lastQueryGpuMs ?? 0 };
+  };
+}
 
 function makeBrowserVecEngine(dim) {
   let db;
+  let device = null;
   let n = 0;
   return {
     name: 'BrowserVec (WebGPU flat)',
     async build(vectors, ids) {
-      db = await BrowserVec.create({ dimension: dim, metric: 'cosine', normalize: false, fallback: 'wasm' });
+      device = await createBenchDevice();
+      db = await BrowserVec.create({
+        dimension: dim, metric: 'cosine', normalize: false, fallback: 'wasm',
+        ...(device ? { device } : {}),
+      });
+      this.query = browserVecQuery(db);
       n = vectors.length;
       const t0 = performance.now();
       await db.addBatch(vectors.map((v, i) => ({ id: ids[i], vector: v })));
       return { ms: performance.now() - t0 };
     },
-    async query(q, k) {
-      const t0 = performance.now();
-      const hits = await db.query(q, { k });
-      return { ids: hits.map((h) => h.id), ms: performance.now() - t0 };
+    query: null, // installed in build()
+    async transferEstimateMs() {
+      return device ? measureTransferMs(device) : 0;
     },
     memoryBytes() {
       return n * dim * 4; // raw fp32 corpus; GPU buffer(s) hold an equivalent copy
     },
-    destroy() { db?.destroy(); },
+    destroy() { db?.destroy(); }, // also destroys the injected device
   };
 }
 
-function makeHnswEngine(dim, efConstruction, m) {
+// Quantized BrowserVec: the corpus the GPU scans is rotated + packed codes
+// (int8 = ~4× smaller than fp32, 1-bit = ~32×), and an exact fp32 re-rank on
+// the over-fetched candidates recovers recall. Memory reports the scan-corpus
+// bytes (codes + per-row scale) — the same convention as the flat row, which
+// reports its fp32 scan corpus. Requires WebGPU (no CPU fallback for quant).
+function makeBrowserVecQuantEngine(dim, bits) {
+  let db;
+  let device = null;
+  let n = 0;
+  const paddedDim = Math.max(4, 2 ** Math.ceil(Math.log2(dim))); // Hadamard pad
+  return {
+    name: `BrowserVec (WebGPU ${bits === 1 ? '1-bit' : `int${bits}`} + rerank)`,
+    async build(vectors, ids) {
+      device = await createBenchDevice();
+      if (!device) throw new Error('quantized mode requires WebGPU');
+      db = await BrowserVec.create({ dimension: dim, metric: 'cosine', normalize: false, quantBits: bits, device });
+      this.query = browserVecQuery(db);
+      n = vectors.length;
+      const t0 = performance.now();
+      await db.addBatch(vectors.map((v, i) => ({ id: ids[i], vector: v })));
+      return { ms: performance.now() - t0 };
+    },
+    query: null, // installed in build()
+    async transferEstimateMs() {
+      return device ? measureTransferMs(device) : 0;
+    },
+    memoryBytes() {
+      const codeBytes = (paddedDim * bits) / 8;
+      return n * (codeBytes + 4); // packed codes + fp32 scale per row
+    },
+    destroy() { db?.destroy(); }, // also destroys the injected device
+  };
+}
+
+// voy-search: Rust→WASM kd-tree, browser-first. The wasm-bindgen module is
+// initialized manually (fetch + instantiate) so no extra Vite plugin is needed.
+let voyInit = null;
+async function initVoy() {
+  voyInit ??= (async () => {
+    const imports = { './voy_search_bg.js': voyBg };
+    let instance;
+    try {
+      ({ instance } = await WebAssembly.instantiateStreaming(fetch(voyWasmUrl), imports));
+    } catch {
+      // Server didn't send application/wasm — fall back to ArrayBuffer instantiation.
+      const buf = await (await fetch(voyWasmUrl)).arrayBuffer();
+      ({ instance } = await WebAssembly.instantiate(buf, imports));
+    }
+    voyBg.__wbg_set_wasm(instance.exports);
+    return voyBg;
+  })();
+  return voyInit;
+}
+
+// voy ingests JSON resources (number[] per vector) — fine at demo scale, but
+// 50k×768 means ~38M boxed numbers through serde; the runner skips it there.
+const VOY_MAX_CELLS = 8_000_000;
+
+function makeVoyEngine(dim) {
+  let voy;
+  let n = 0;
+  return {
+    name: 'voy-search (WASM kd-tree)',
+    async build(vectors, ids) {
+      const bg = await initVoy();
+      n = vectors.length;
+      const t0 = performance.now();
+      const resource = {
+        embeddings: vectors.map((v, i) => ({ id: ids[i], title: '', url: '', embeddings: Array.from(v) })),
+      };
+      voy = new bg.Voy(resource);
+      return { ms: performance.now() - t0 };
+    },
+    async query(q, k) {
+      const t0 = performance.now();
+      const res = voy.search(q, k);
+      const ms = performance.now() - t0;
+      return { ids: res.neighbors.map((nb) => nb.id), ms, cpuMs: ms, gpuMs: 0 };
+    },
+    memoryBytes() {
+      return n * dim * 4; // vector data; kd-tree node overhead not estimated
+    },
+    destroy() { voy?.free?.(); },
+  };
+}
+
+// Orama: pure-JS search library with brute-force cosine vector search.
+function makeOramaEngine(dim) {
+  let db;
+  let n = 0;
+  return {
+    name: 'Orama (pure JS vector)',
+    async build(vectors, ids) {
+      n = vectors.length;
+      const t0 = performance.now();
+      db = oramaCreate({ schema: { embedding: `vector[${dim}]` } });
+      await oramaInsertMultiple(db, vectors.map((v, i) => ({ id: ids[i], embedding: Array.from(v) })));
+      return { ms: performance.now() - t0 };
+    },
+    async query(q, k) {
+      const t0 = performance.now();
+      const res = await oramaSearch(db, {
+        mode: 'vector',
+        vector: { value: Array.from(q), property: 'embedding' },
+        similarity: 0, // don't threshold-filter; we want a plain top-k
+        limit: k,
+      });
+      const ms = performance.now() - t0;
+      return { ids: res.hits.map((h) => h.id), ms, cpuMs: ms, gpuMs: 0 };
+    },
+    memoryBytes() {
+      return n * dim * 4; // vector data; JS object/index overhead not estimated
+    },
+    destroy() { db = null; },
+  };
+}
+
+function makeHnswEngine(dim, efConstruction, m, efSearch) {
   let index;
   let labelToId = [];
   let n = 0;
   return {
-    name: `hnswlib-wasm (HNSW, ef=${efConstruction} M=${m})`,
+    name: `hnswlib-wasm (HNSW, efC=${efConstruction} M=${m} efS=${efSearch})`,
     async build(vectors, ids) {
       const mod = await loadHnswlib();
       index = new mod.HierarchicalNSW('cosine', dim, '');
       index.initIndex(vectors.length, m, efConstruction, 100);
+      // efSearch defaults to ~10 in hnswlib — below k it can't even hold k
+      // candidates and recall collapses. Always set it explicitly (≥ k, done
+      // by the caller) so the recall/latency trade-off is the real one.
+      index.setEfSearch(efSearch);
       labelToId = ids;
       n = vectors.length;
       const t0 = performance.now();
@@ -297,16 +511,32 @@ async function runEngine(engine, corpus, queries, k) {
   await engine.query(queries[0], k);
 
   let totalMs = 0;
+  let totalCpuMs = 0;
+  let totalGpuMs = 0;
   const perQueryIds = [];
   for (let i = 0; i < queries.length; i++) {
     const r = await engine.query(queries[i], k);
     totalMs += r.ms;
+    totalCpuMs += r.cpuMs ?? r.ms; // WASM/JS engines: everything is CPU
+    totalGpuMs += r.gpuMs ?? 0;
     perQueryIds.push(r.ids);
   }
-  const avgMs = totalMs / queries.length;
+  const nq = queries.length;
+  const avgMs = totalMs / nq;
   const qps = 1000 / avgMs;
 
-  log(`  query: ${avgMs.toFixed(3)} ms/q avg, ${qps.toFixed(0)} q/s`);
+  // Transfer: measured raw readback round-trip on the engine's own device
+  // (0 / n.a. for CPU-only engines). Reported GPU time is the wait minus that
+  // fixed sync cost, so "GPU" ≈ kernel execution + queue scheduling.
+  const transferMs = engine.transferEstimateMs ? await engine.transferEstimateMs() : 0;
+  const avgGpuWaitMs = totalGpuMs / nq;
+  const avgTransferMs = Math.min(transferMs, avgGpuWaitMs);
+  const avgGpuMs = avgGpuWaitMs - avgTransferMs;
+  const avgCpuMs = totalCpuMs / nq;
+  const gpuBusy = avgMs > 0 ? avgGpuWaitMs / avgMs : 0;
+
+  log(`  query: ${avgMs.toFixed(3)} ms/q avg, ${qps.toFixed(0)} q/s` +
+    (avgGpuWaitMs > 0 ? ` (cpu ${avgCpuMs.toFixed(3)} + gpu ${avgGpuMs.toFixed(3)} + xfer ${avgTransferMs.toFixed(3)} ms)` : ''));
 
   const memBytes = engine.memoryBytes();
   engine.destroy();
@@ -317,6 +547,11 @@ async function runEngine(engine, corpus, queries, k) {
     ingestRate,
     avgQueryMs: avgMs,
     qps,
+    avgCpuMs,
+    avgGpuMs,
+    avgTransferMs,
+    gpuBusy,
+    isGpu: avgGpuWaitMs > 0,
     perQueryIds,
     memBytes,
   };
@@ -337,10 +572,12 @@ async function runAll() {
   const k = parseInt($('kVal').value);
   const queryCount = parseInt($('queryCount').value);
   const [efConstruction, m] = $('hnswParams').value.split(',').map(Number);
+  // efSearch must be ≥ k or HNSW's candidate list can't hold k results.
+  const efSearch = Math.max(parseInt($('hnswEfSearch').value), k);
 
   $('runBtn').disabled = true;
   $('log').textContent = '';
-  $('resultsBody').innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">Running…</td></tr>`;
+  $('resultsBody').innerHTML = `<tr><td colspan="9" style="text-align:center;color:#999;">Running…</td></tr>`;
 
   log(`Generating ${n.toLocaleString()} clustered ${dim}-dim vectors...`);
   const corpus = generateCorpus(n, dim);
@@ -354,9 +591,17 @@ async function runAll() {
 
   const engines = [
     makeBrowserVecEngine(dim),
-    makeHnswEngine(dim, efConstruction, m),
+    makeBrowserVecQuantEngine(dim, 8),
+    makeBrowserVecQuantEngine(dim, 1),
+    makeHnswEngine(dim, efConstruction, m, efSearch),
     makeVectoriousEngine(dim),
+    makeOramaEngine(dim),
   ];
+  if (n * dim <= VOY_MAX_CELLS) {
+    engines.push(makeVoyEngine(dim));
+  } else {
+    log(`voy-search skipped: ${n.toLocaleString()}×${dim} exceeds its JSON-ingest comfort zone (${(VOY_MAX_CELLS / 1e6).toFixed(0)}M cells) — try a smaller corpus/dim.`, 'warn');
+  }
 
   const results = [{ ...gtRun, recall: 1 }];
   for (const engine of engines) {
@@ -374,7 +619,7 @@ async function runAll() {
   renderResults(results);
   $('configNote').textContent =
     `${n.toLocaleString()} rows × ${dim} dim, ${queryCount} queries, k=${k}. ` +
-    `Ground truth: naive JS brute force (exact). HNSW build: efConstruction=${efConstruction}, M=${m}.`;
+    `Ground truth: naive JS brute force (exact). HNSW: efConstruction=${efConstruction}, M=${m}, efSearch=${efSearch}.`;
   $('runBtn').disabled = false;
 }
 
@@ -397,13 +642,53 @@ function renderResults(results) {
       <td>${r.ingestRate.toFixed(0)} rows/s</td>
       <td>${r.avgQueryMs.toFixed(3)} ms</td>
       <td>${r.qps.toFixed(0)}</td>
+      <td>${r.avgCpuMs.toFixed(3)} ms</td>
+      <td>${r.isGpu ? r.avgGpuMs.toFixed(3) + ' ms' : '—'}</td>
+      <td>${r.isGpu ? r.avgTransferMs.toFixed(3) + ' ms' : '—'}</td>
       <td class="${recallCls}">${recallPct.toFixed(1)}%</td>
       <td>${fmtBytes(r.memBytes)}</td>
     `;
   }
 
   renderBarChart('latencyChart', 'Avg query latency (lower is better)', results, (r) => r.avgQueryMs, (v) => v.toFixed(3) + ' ms', (v, max) => (v <= max * 0.34 ? '#2e7d32' : v <= max * 0.67 ? '#e65100' : '#d32f2f'));
+  renderStackedChart('breakdownChart', 'Query time breakdown — CPU / GPU / transfer (ms)', results, [
+    { label: 'CPU', color: '#1a73e8', valueFn: (r) => r.avgCpuMs },
+    { label: 'GPU', color: '#2e7d32', valueFn: (r) => r.avgGpuMs },
+    { label: 'Transfer', color: '#e65100', valueFn: (r) => r.avgTransferMs },
+  ]);
+  renderBarChart('gpuBusyChart', 'GPU busy — fraction of query wall time waiting on GPU work (approx)', results, (r) => r.gpuBusy * 100, (v) => v.toFixed(0) + '%', () => '#2e7d32');
+  renderBarChart('memoryChart', 'Scan-corpus memory (lower is better)', results, (r) => r.memBytes, (v) => fmtBytes(v), (v, max) => (v <= max * 0.34 ? '#2e7d32' : v <= max * 0.67 ? '#e65100' : '#d32f2f'));
   renderBarChart('recallChart', 'Recall@k (higher is better)', results, (r) => r.recall * 100, (v) => v.toFixed(1) + '%', (v) => (v >= 95 ? '#2e7d32' : v >= 80 ? '#e65100' : '#d32f2f'));
+}
+
+// Horizontal stacked bars: one row per engine, segments per component. All rows
+// share one scale (the largest total), so lengths compare across engines.
+function renderStackedChart(containerId, title, results, segments) {
+  const container = $(containerId);
+  container.innerHTML = `<h3 style="font-size:.9rem;margin:.5rem 0;">${title}</h3>`;
+
+  const legend = document.createElement('div');
+  legend.style.cssText = 'font-size:.72rem;color:#555;margin:.2rem 0 .4rem;';
+  legend.innerHTML = segments
+    .map((s) => `<span style="display:inline-block;width:10px;height:10px;background:${s.color};border-radius:2px;margin:0 .3rem 0 .8rem;"></span>${s.label}`)
+    .join('');
+  container.appendChild(legend);
+
+  const max = Math.max(...results.map((r) => segments.reduce((a, s) => a + s.valueFn(r), 0)), 1e-9);
+  for (const r of results) {
+    const total = segments.reduce((a, s) => a + s.valueFn(r), 0);
+    const row = document.createElement('div');
+    row.className = 'row';
+    const bars = segments
+      .filter((s) => s.valueFn(r) > 0)
+      .map((s) => `<span class="bar" style="display:inline-block;width:${Math.max((s.valueFn(r) / max) * 100, 0.4)}%;background:${s.color};height:12px;border-radius:0;" title="${s.label}: ${s.valueFn(r).toFixed(3)} ms"></span>`)
+      .join('');
+    row.innerHTML = `
+      <span class="lbl">${r.name}</span>
+      <span class="bar-wrap" style="white-space:nowrap;">${bars} ${total.toFixed(3)} ms</span>
+    `;
+    container.appendChild(row);
+  }
 }
 
 function renderBarChart(containerId, title, results, valueFn, fmtFn, colorFn) {

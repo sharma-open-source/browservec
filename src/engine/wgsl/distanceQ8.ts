@@ -45,26 +45,24 @@ export function buildQuantShader(key: QuantShaderKey): string {
 override WG: u32 = ${workgroupSize}u;
 
 @group(0) @binding(0) var<storage, read>       corpus: array<u32>;  // ${words} words/row
-@group(0) @binding(1) var<storage, read>       query:  array<f32>;  // rotated, ${paddedDim} long
+@group(0) @binding(1) var<storage, read>       query:  array<vec4<f32>>;  // rotated, ${words} vec4s
 @group(0) @binding(2) var<storage, read_write> scores: array<f32>;
 @group(0) @binding(3) var<storage, read>       scales: array<f32>;  // per row
 @group(0) @binding(4) var<uniform>             params: vec4<u32>;   // x = count, y = codes/scale base row, z = score output offset (indexed)
 ${candidateBinding}
 
-var<workgroup> q_shared: array<f32, ${paddedDim}>;
+var<workgroup> q_shared: array<vec4<f32>, ${words}>;
 
 fn score_row(wordBase: u32, scale: f32) -> f32 {
   var acc: f32 = 0.0;
   var g: u32 = 0u;
   loop {
     if (g >= ${words}u) { break; }
-    let v = unpack4x8snorm(corpus[wordBase + g]) * scale; // 4 coords dequantized
-    let o = g * 4u;
-    let q = vec4<f32>(q_shared[o], q_shared[o + 1u], q_shared[o + 2u], q_shared[o + 3u]);
-    acc = dot(v, q) + acc;
+    let v = unpack4x8snorm(corpus[wordBase + g]); // 4 coords dequantized
+    acc = dot(v, q_shared[g]) + acc;
     g = g + 1u;
   }
-  return acc;
+  return acc * scale; // per-row scale factored out of the loop
 }
 
 @compute @workgroup_size(WG)
@@ -72,7 +70,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(local_invocation_id)  lid: vec3<u32>) {
   var k: u32 = lid.x;
   loop {
-    if (k >= ${paddedDim}u) { break; }
+    if (k >= ${words}u) { break; }
     q_shared[k] = query[k];
     k = k + WG;
   }

@@ -15,6 +15,7 @@ import {
   type ScorePair,
 } from '../engine/buffers.js';
 import { buildDistanceShader } from '../engine/wgsl/distance.js';
+import { tracedGpuWait } from '../engine/profile.js';
 import { GpuTopK } from './gpuTopk.js';
 
 const WORKGROUP_SIZE = 64;
@@ -46,6 +47,7 @@ export class FlatIndex {
   private scoreCapacity = 0;
   private rows = 0;
   private gpuTopk: GpuTopK | null = null;
+  private readonly paramsScratch = new Uint32Array(4);
 
   constructor(
     private readonly ctx: DeviceContext,
@@ -125,7 +127,9 @@ export class FlatIndex {
     // rewritten per chunk, so each chunk is its own submit to keep the uniform
     // stable for its dispatch (the queue preserves write/submit order).
     this.corpus.eachChunk((buffer, baseRow, rowCount) => {
-      device.queue.writeBuffer(this.paramsBuf, 0, new Uint32Array([rowCount, baseRow, 0, 0]));
+      this.paramsScratch[0] = rowCount;
+      this.paramsScratch[1] = baseRow;
+      device.queue.writeBuffer(this.paramsBuf, 0, this.paramsScratch);
       const bind = device.createBindGroup({
         layout: this.pipeline.getBindGroupLayout(0),
         entries: [
@@ -156,11 +160,13 @@ export class FlatIndex {
     enc.copyBufferToBuffer(sp.scores, 0, sp.readback, 0, this.rows * 4);
     device.queue.submit([enc.finish()]);
 
-    await sp.readback.mapAsync(GPUMapMode.READ, 0, this.rows * 4);
-    const scores = new Float32Array(sp.readback.getMappedRange(0, this.rows * 4).slice(0));
+    await tracedGpuWait(sp.readback.mapAsync(GPUMapMode.READ, 0, this.rows * 4));
+    // Select straight off the mapped GPU memory — no O(N) copy. topK's output
+    // holds no references into the mapped range, so unmapping after is safe.
+    const scores = new Float32Array(sp.readback.getMappedRange(0, this.rows * 4));
+    const hits = topK(scores, this.rows, k);
     sp.readback.unmap();
-
-    return topK(scores, this.rows, k);
+    return hits;
   }
 
   destroy(): void {
