@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — Benchmark Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem auto; max-width: 1080px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  .subtitle { color: #666; margin-top: 0; font-size: .9rem; }
+  .note { color: #888; font-size: .8rem; background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: .6rem .8rem; margin: .75rem 0; }
+  .controls { display: flex; gap: .75rem; margin: 1rem 0; flex-wrap: wrap; align-items: end; }
+  .controls label { font-size: .85rem; display: flex; flex-direction: column; gap: .2rem; }
+  .controls input, .controls select { padding: .4rem; border: 1px solid #ddd; border-radius: 4px; font: inherit; font-size: .85rem; }
+  .controls button { padding: .5rem 1rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font: inherit; font-weight: 600; }
+  .controls button:disabled { opacity: .5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; margin: .75rem 0; }
+  th, td { padding: .5rem .6rem; text-align: right; border-bottom: 1px solid #eee; }
+  th { text-align: right; background: #fafafa; font-weight: 600; color: #555; }
+  td:first-child, th:first-child { text-align: left; }
+  .good { color: #2e7d32; font-weight: 600; }
+  .warn { color: #e65100; }
+  .bad { color: #d32f2f; }
+  .bar-cell { display: flex; align-items: center; gap: .4rem; justify-content: flex-end; }
+  .bar { height: 12px; border-radius: 3px; }
+  .chart { margin: .5rem 0 1.5rem; }
+  .chart .row { display: flex; align-items: center; margin: 3px 0; font-size: .78rem; }
+  .chart .row .lbl { width: 220px; text-align: right; padding-right: .5rem; color: #555; flex-shrink: 0; }
+  .chart .row .bar-wrap { flex: 1; }
+  pre { background: #111; color: #b9f; padding: .75rem; border-radius: 6px; overflow: auto; font-size: .78rem; max-height: 320px; }
+  .log-area { margin-top: 1rem; }
+  .log-area summary { cursor: pointer; font-weight: 600; color: #555; font-size: .85rem; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>Benchmark Dashboard</h1>
+<p class="subtitle">BrowserVec vs. hnswlib-wasm vs. Vectorious (BLAS brute force) vs. naive JS brute force —
+latency, recall, memory, and ingest speed, all running live in this tab on synthetic clustered vectors.</p>
+
+<div class="note">
+  Recall is measured against the <strong>naive JS brute force</strong> engine's results, since it's
+  an exact (not approximate) scan — same reference the other engines are checked against. BrowserVec's
+  default flat index is also exact, so it should track ~100% recall; hnswlib-wasm is the only genuinely
+  approximate engine here, so its recall depends on the <code>ef</code>/<code>M</code> build parameters below.
+  Memory is a computed bytes-per-row estimate (raw vector storage, plus a rough graph-overhead term for
+  hnswlib-wasm), not a measured heap snapshot — WASM/JS heap introspection isn't reliable enough across
+  browsers to report as ground truth.
+</div>
+
+<div class="controls">
+  <label>Corpus size
+    <select id="corpusSize">
+      <option value="1000">1,000</option>
+      <option value="5000" selected>5,000</option>
+      <option value="20000">20,000</option>
+      <option value="50000">50,000</option>
+    </select>
+  </label>
+  <label>Dimensions
+    <select id="dimension">
+      <option value="64">64</option>
+      <option value="128" selected>128</option>
+      <option value="384">384 (text)</option>
+      <option value="768">768</option>
+    </select>
+  </label>
+  <label>k (neighbors)
+    <select id="kVal">
+      <option value="10" selected>10</option>
+      <option value="20">20</option>
+    </select>
+  </label>
+  <label>Query count
+    <select id="queryCount">
+      <option value="20">20</option>
+      <option value="50" selected>50</option>
+      <option value="100">100</option>
+    </select>
+  </label>
+  <label>HNSW efConstruction / M
+    <select id="hnswParams">
+      <option value="100,12">100 / 12 (fast build, lower recall)</option>
+      <option value="200,16" selected>200 / 16 (default)</option>
+      <option value="400,32">400 / 32 (slow build, higher recall)</option>
+    </select>
+  </label>
+  <button id="runBtn">Run Benchmark</button>
+</div>
+<div class="note" id="configNote"></div>
+
+<table id="resultsTable">
+  <thead>
+    <tr>
+      <th>Engine</th>
+      <th>Ingest</th>
+      <th>Avg query latency</th>
+      <th>Queries/sec</th>
+      <th>Recall@k</th>
+      <th>Memory (est.)</th>
+    </tr>
+  </thead>
+  <tbody id="resultsBody"><tr><td colspan="6" style="text-align:center;color:#999;">Run the benchmark to see results.</td></tr></tbody>
+</table>
+
+<div class="chart" id="latencyChart"></div>
+<div class="chart" id="recallChart"></div>
+
+<details class="log-area">
+  <summary>Detailed log</summary>
+  <pre id="log">ready.</pre>
+</details>
+
+<script type="module">
+import { BrowserVec } from '../src/index.ts';
+import { loadHnswlib } from 'hnswlib-wasm';
+import { array as vArray, dot as vDot } from 'vectorious';
+
+const $ = (id) => document.getElementById(id);
+const log = (msg, cls = '') => { $('log').innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`; };
+
+// ---- Synthetic clustered corpus ----
+// Uniform-random vectors are a worst case for approximate search (no structure
+// to exploit), so — like the IVF example/demo — we generate clustered vectors:
+// real embeddings cluster, and recall differences between exact and approximate
+// engines only show up on data with actual structure.
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function normalize(v) {
+  let sum = 0;
+  for (let i = 0; i < v.length; i++) sum += v[i] * v[i];
+  const norm = Math.sqrt(sum) || 1;
+  for (let i = 0; i < v.length; i++) v[i] /= norm;
+  return v;
+}
+
+function generateCorpus(n, dim, seed = 42) {
+  const rand = mulberry32(seed);
+  const numClusters = Math.max(4, Math.round(Math.sqrt(n) / 2));
+  const centers = Array.from({ length: numClusters }, () => {
+    const c = new Float32Array(dim);
+    for (let d = 0; d < dim; d++) c[d] = (rand() * 2 - 1);
+    return normalize(c);
+  });
+
+  const vectors = [];
+  const ids = [];
+  for (let i = 0; i < n; i++) {
+    const center = centers[i % numClusters];
+    const v = new Float32Array(dim);
+    for (let d = 0; d < dim; d++) v[d] = center[d] + (rand() * 2 - 1) * 0.35;
+    vectors.push(normalize(v));
+    ids.push(`row-${i}`);
+  }
+  return { vectors, ids };
+}
+
+// ---- Engine adapters ----
+// Every engine exposes the same shape so the runner doesn't special-case any
+// of them: build(vectors, ids) -> {ms}, query(vec, k) -> {ids, ms}, memoryBytes(), destroy().
+
+function makeBrowserVecEngine(dim) {
+  let db;
+  let n = 0;
+  return {
+    name: 'BrowserVec (WebGPU flat)',
+    async build(vectors, ids) {
+      db = await BrowserVec.create({ dimension: dim, metric: 'cosine', normalize: false, fallback: 'wasm' });
+      n = vectors.length;
+      const t0 = performance.now();
+      await db.addBatch(vectors.map((v, i) => ({ id: ids[i], vector: v })));
+      return { ms: performance.now() - t0 };
+    },
+    async query(q, k) {
+      const t0 = performance.now();
+      const hits = await db.query(q, { k });
+      return { ids: hits.map((h) => h.id), ms: performance.now() - t0 };
+    },
+    memoryBytes() {
+      return n * dim * 4; // raw fp32 corpus; GPU buffer(s) hold an equivalent copy
+    },
+    destroy() { db?.destroy(); },
+  };
+}
+
+function makeHnswEngine(dim, efConstruction, m) {
+  let index;
+  let labelToId = [];
+  let n = 0;
+  return {
+    name: `hnswlib-wasm (HNSW, ef=${efConstruction} M=${m})`,
+    async build(vectors, ids) {
+      const mod = await loadHnswlib();
+      index = new mod.HierarchicalNSW('cosine', dim, '');
+      index.initIndex(vectors.length, m, efConstruction, 100);
+      labelToId = ids;
+      n = vectors.length;
+      const t0 = performance.now();
+      const items = vectors.map((v) => Array.from(v));
+      const labels = ids.map((_, i) => i);
+      index.addPoints(items, labels, false);
+      return { ms: performance.now() - t0 };
+    },
+    async query(q, k) {
+      const t0 = performance.now();
+      const res = index.searchKnn(Array.from(q), k, undefined);
+      const ids = res.neighbors.map((label) => labelToId[label]);
+      return { ids, ms: performance.now() - t0 };
+    },
+    memoryBytes() {
+      // Data + a rough per-node graph-link overhead (M bidirectional links,
+      // ~2 layers on average, 4 bytes/link + label/metadata slop). This is a
+      // back-of-envelope estimate, not a measured allocation.
+      const dataBytes = n * dim * 4;
+      const graphBytes = n * m * 2 * 4 * 2;
+      return dataBytes + graphBytes;
+    },
+    destroy() { index?.delete?.(); },
+  };
+}
+
+function makeVectoriousEngine(dim) {
+  let rows = [];
+  let ids = [];
+  return {
+    name: 'Vectorious (brute force, BLAS)',
+    async build(vectors, idList) {
+      const t0 = performance.now();
+      rows = vectors.map((v) => vArray(Array.from(v)));
+      ids = idList;
+      return { ms: performance.now() - t0 };
+    },
+    async query(q, k) {
+      const t0 = performance.now();
+      const qa = vArray(Array.from(q));
+      const scored = new Array(rows.length);
+      for (let i = 0; i < rows.length; i++) scored[i] = { id: ids[i], score: vDot(qa, rows[i]) };
+      scored.sort((a, b) => b.score - a.score);
+      const top = scored.slice(0, k).map((s) => s.id);
+      return { ids: top, ms: performance.now() - t0 };
+    },
+    memoryBytes() { return rows.length * dim * 4; },
+    destroy() {},
+  };
+}
+
+function makeNaiveBruteForceEngine(dim) {
+  let data = [];
+  let ids = [];
+  return {
+    name: 'Brute force (naive JS)',
+    async build(vectors, idList) {
+      const t0 = performance.now();
+      data = vectors;
+      ids = idList;
+      return { ms: performance.now() - t0 };
+    },
+    async query(q, k) {
+      const t0 = performance.now();
+      const n = data.length;
+      const scores = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const row = data[i];
+        let s = 0;
+        for (let d = 0; d < dim; d++) s += row[d] * q[d];
+        scores[i] = s;
+      }
+      const order = Array.from(scores.keys()).sort((a, b) => scores[b] - scores[a]).slice(0, k);
+      return { ids: order.map((i) => ids[i]), ms: performance.now() - t0 };
+    },
+    memoryBytes() { return data.length * dim * 4; },
+    destroy() {},
+  };
+}
+
+// ---- Benchmark runner ----
+// Runs one engine end to end and returns both its timing/memory metrics and
+// the raw per-query result-id lists — recall is computed by the caller
+// against a shared ground truth, so the exact-reference engine only builds
+// and queries once (its own results double as the ground truth).
+async function runEngine(engine, corpus, queries, k) {
+  log(`--- ${engine.name} ---`);
+
+  const buildResult = await engine.build(corpus.vectors, corpus.ids);
+  const ingestRate = corpus.vectors.length / (buildResult.ms / 1000);
+  log(`  ingest: ${buildResult.ms.toFixed(0)} ms (${ingestRate.toFixed(0)} rows/s)`);
+
+  // Warm-up query (compiles shaders / JITs hot loops).
+  await engine.query(queries[0], k);
+
+  let totalMs = 0;
+  const perQueryIds = [];
+  for (let i = 0; i < queries.length; i++) {
+    const r = await engine.query(queries[i], k);
+    totalMs += r.ms;
+    perQueryIds.push(r.ids);
+  }
+  const avgMs = totalMs / queries.length;
+  const qps = 1000 / avgMs;
+
+  log(`  query: ${avgMs.toFixed(3)} ms/q avg, ${qps.toFixed(0)} q/s`);
+
+  const memBytes = engine.memoryBytes();
+  engine.destroy();
+
+  return {
+    name: engine.name,
+    ingestMs: buildResult.ms,
+    ingestRate,
+    avgQueryMs: avgMs,
+    qps,
+    perQueryIds,
+    memBytes,
+  };
+}
+
+function recallAgainst(perQueryIds, groundTruth, k) {
+  let hitCount = 0;
+  for (let i = 0; i < perQueryIds.length; i++) {
+    const truth = groundTruth[i];
+    hitCount += perQueryIds[i].filter((id) => truth.has(id)).length;
+  }
+  return hitCount / (perQueryIds.length * k);
+}
+
+async function runAll() {
+  const n = parseInt($('corpusSize').value);
+  const dim = parseInt($('dimension').value);
+  const k = parseInt($('kVal').value);
+  const queryCount = parseInt($('queryCount').value);
+  const [efConstruction, m] = $('hnswParams').value.split(',').map(Number);
+
+  $('runBtn').disabled = true;
+  $('log').textContent = '';
+  $('resultsBody').innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">Running…</td></tr>`;
+
+  log(`Generating ${n.toLocaleString()} clustered ${dim}-dim vectors...`);
+  const corpus = generateCorpus(n, dim);
+  const rand = mulberry32(1337);
+  const queries = Array.from({ length: queryCount }, () => corpus.vectors[Math.floor(rand() * n)]);
+
+  // Ground truth from the naive exact brute-force engine — its own results
+  // double as the "reference" row (recall trivially 100% against itself).
+  const gtRun = await runEngine(makeNaiveBruteForceEngine(dim), corpus, queries, k);
+  const groundTruth = gtRun.perQueryIds.map((ids) => new Set(ids));
+
+  const engines = [
+    makeBrowserVecEngine(dim),
+    makeHnswEngine(dim, efConstruction, m),
+    makeVectoriousEngine(dim),
+  ];
+
+  const results = [{ ...gtRun, recall: 1 }];
+  for (const engine of engines) {
+    try {
+      const r = await runEngine(engine, corpus, queries, k);
+      const recall = recallAgainst(r.perQueryIds, groundTruth, k);
+      log(`  recall@${k} vs. ground truth = ${(recall * 100).toFixed(1)}%`);
+      results.push({ ...r, recall });
+    } catch (e) {
+      log(`ERROR on ${engine.name}: ${e.message}`, 'bad');
+      console.error(e);
+    }
+  }
+
+  renderResults(results);
+  $('configNote').textContent =
+    `${n.toLocaleString()} rows × ${dim} dim, ${queryCount} queries, k=${k}. ` +
+    `Ground truth: naive JS brute force (exact). HNSW build: efConstruction=${efConstruction}, M=${m}.`;
+  $('runBtn').disabled = false;
+}
+
+function fmtBytes(b) {
+  if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MiB';
+  if (b >= 1024) return (b / 1024).toFixed(1) + ' KiB';
+  return b.toFixed(0) + ' B';
+}
+
+function renderResults(results) {
+  const tbody = $('resultsBody');
+  tbody.innerHTML = '';
+
+  for (const r of results) {
+    const tr = tbody.insertRow();
+    const recallPct = r.recall * 100;
+    const recallCls = recallPct >= 95 ? 'good' : recallPct >= 80 ? 'warn' : 'bad';
+    tr.innerHTML = `
+      <td>${r.name}</td>
+      <td>${r.ingestRate.toFixed(0)} rows/s</td>
+      <td>${r.avgQueryMs.toFixed(3)} ms</td>
+      <td>${r.qps.toFixed(0)}</td>
+      <td class="${recallCls}">${recallPct.toFixed(1)}%</td>
+      <td>${fmtBytes(r.memBytes)}</td>
+    `;
+  }
+
+  renderBarChart('latencyChart', 'Avg query latency (lower is better)', results, (r) => r.avgQueryMs, (v) => v.toFixed(3) + ' ms', (v, max) => (v <= max * 0.34 ? '#2e7d32' : v <= max * 0.67 ? '#e65100' : '#d32f2f'));
+  renderBarChart('recallChart', 'Recall@k (higher is better)', results, (r) => r.recall * 100, (v) => v.toFixed(1) + '%', (v) => (v >= 95 ? '#2e7d32' : v >= 80 ? '#e65100' : '#d32f2f'));
+}
+
+function renderBarChart(containerId, title, results, valueFn, fmtFn, colorFn) {
+  const container = $(containerId);
+  container.innerHTML = `<h3 style="font-size:.9rem;margin:.5rem 0;">${title}</h3>`;
+  const max = Math.max(...results.map(valueFn), 1e-9);
+
+  for (const r of results) {
+    const val = valueFn(r);
+    const pct = (val / max) * 100;
+    const color = colorFn(val, max);
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `
+      <span class="lbl">${r.name}</span>
+      <span class="bar-wrap">
+        <span class="bar" style="display:inline-block;width:${Math.max(pct, 1.5)}%;background:${color};height:12px;border-radius:3px;"></span>
+        ${fmtFn(val)}
+      </span>
+    `;
+    container.appendChild(row);
+  }
+}
+
+function updateConfigNote() {
+  const n = parseInt($('corpusSize').value);
+  const dim = parseInt($('dimension').value);
+  $('configNote').textContent = `${n.toLocaleString()} rows × ${dim} dim — click "Run Benchmark" to compare all engines.`;
+}
+$('corpusSize').onchange = updateConfigNote;
+$('dimension').onchange = updateConfigNote;
+updateConfigNote();
+
+$('runBtn').onclick = runAll;
+
+log('Ready. Configure and click "Run Benchmark".');
+</script>
+</body>
+</html>
