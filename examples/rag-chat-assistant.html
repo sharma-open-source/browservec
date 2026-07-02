@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — RAG Chat Assistant</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 860px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  .subtitle { color: #666; margin-top: 0; font-size: .9rem; }
+  .layout { display: flex; gap: 1rem; min-height: 500px; }
+  .panel { flex: 1; border: 1px solid #ddd; border-radius: 8px; padding: 1rem; overflow-y: auto; max-height: 600px; }
+  .panel h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .05em; color: #888; margin: 0 0 .75rem 0; }
+  .doc-list { list-style: none; padding: 0; margin: 0; font-size: .85rem; }
+  .doc-list li { padding: .4rem .5rem; border-radius: 4px; margin-bottom: .25rem; background: #f9f9f9; cursor: pointer; }
+  .doc-list li:hover { background: #eef; }
+  .doc-list li.active { background: #e3f2fd; font-weight: 600; }
+  .chat-area { display: flex; flex-direction: column; gap: .5rem; }
+  .msg { padding: .5rem .75rem; border-radius: 8px; font-size: .85rem; line-height: 1.4; }
+  .msg.user { background: #e3f2fd; align-self: flex-end; max-width: 80%; }
+  .msg.assistant { background: #f5f5f5; align-self: flex-start; max-width: 100%; }
+  .msg .context { font-size: .75rem; color: #888; margin-top: .25rem; border-top: 1px solid #ddd; padding-top: .25rem; }
+  .input-row { display: flex; gap: .5rem; margin-top: .5rem; }
+  .input-row input { flex: 1; padding: .5rem; border: 1px solid #ddd; border-radius: 6px; font: inherit; }
+  .input-row button { padding: .5rem 1rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font: inherit; }
+  .input-row button:disabled { opacity: .5; cursor: not-allowed; }
+  .badge { display: inline-block; font-size: .7rem; padding: .1rem .4rem; border-radius: 4px; background: #e8f5e9; color: #2e7d32; margin-right: .3rem; }
+  .status { font-size: .8rem; color: #888; }
+  .status .ok { color: #2e7d32; }
+  .status .err { color: #c62828; }
+  pre { margin: 0; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>RAG Chat Assistant</h1>
+<p class="subtitle">Ingest documents, then chat with an LLM that sees retrieved context — all offline in the browser.</p>
+<p class="status" id="status">Initializing...</p>
+
+<div class="layout">
+  <div class="panel" style="max-width: 260px;">
+    <h2>Documents</h2>
+    <ul class="doc-list" id="docList"></ul>
+    <p style="font-size: .75rem; color: #999; margin-top: .5rem;">Click a doc to add it to the knowledge base.</p>
+  </div>
+  <div class="panel" style="flex: 2;">
+    <h2>Chat</h2>
+    <div id="chat" class="chat-area" style="flex:1; min-height: 350px;">
+      <div class="msg assistant">Hello! I have access to the documents you add. Ask me anything about them.</div>
+    </div>
+    <div class="input-row">
+      <input id="queryInput" type="text" placeholder="Ask a question about your documents..." disabled />
+      <button id="sendBtn" disabled>Send</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const status = $('status');
+const log = (msg, cls = '') => { status.innerHTML = msg; if (cls) status.className = `status ${cls}`; };
+
+// ---- Sample documents for the knowledge base ----
+const DOCUMENTS = [
+  { id: 'doc1', title: 'Getting Started', text: 'BrowserVec is an in-browser WebGPU vector store. Install it with npm install browservec. Create a store with BrowserVec.create({ dimension: 768, metric: "cosine" }). Add vectors with addBatch() and query with query(vector, { k: 10 }).' },
+  { id: 'doc2', title: 'Quantization', text: 'TurboQuant reduces memory by storing vectors as int8 or int4 instead of fp32. int8 uses 4x less memory with near-perfect recall after re-rank. int4 uses 8x less memory but needs a wider re-rank pool. Enable it with quantBits: 8 or quantBits: 4 in the config.' },
+  { id: 'doc3', title: 'IVF Index', text: 'The IVF (inverted file) index clusters vectors with k-means on the GPU. A query scores centroids, picks the nearest clusters (nprobe), and scans only those rows. This trades a small recall loss for a large speedup on large corpora. Enable with ann: {} in the config.' },
+  { id: 'doc4', title: 'Persistence', text: 'BrowserVec saves to OPFS or IndexedDB. Pass persist: { name: "my-store" } to create(). Call save() to flush, export() for a blob, and BrowserVec.import(blob) to restore. Snapshots are versioned binary with magic "BVEC" header.' },
+  { id: 'doc5', title: 'Embedders', text: 'Two built-in embedders: hashingEmbedder (zero-dep, lexical, offline) and transformersEmbedder (semantic via Xenova, lazy-loaded). Implement the Embedder interface to bring your own: { dimension, embed(texts): Promise<Float32Array[]> }.' },
+  { id: 'doc6', title: 'Encryption', text: 'Snapshots can be encrypted at rest with AES-256-GCM. Pass encryption: { passphrase } in the persist config. Each save uses a fresh random salt and IV. A wrong passphrase fails loudly with a GCM auth error.' },
+  { id: 'doc7', title: 'Metrics', text: 'Three similarity metrics: cosine (angle between vectors, range [-1,1]), dot (raw product, sensitive to magnitude), and l2 (negative squared Euclidean distance). Higher score = closer for all metrics.' },
+  { id: 'doc8', title: 'Deletion', text: 'Deletes use tombstones — the id vanishes from results immediately with no GPU rewrite. Memory is reclaimed on save+reload (snapshots compact out deleted rows). Call compact() to reclaim in-place without a reload.' },
+  { id: 'doc9', title: 'Chunking', text: 'GPU buffers have a maxStorageBufferBindingSize limit (128 MiB on many devices). BrowserVec auto-chunks the corpus across multiple buffers and dispatches the distance kernel once per chunk. Results are identical to a single buffer.' },
+  { id: 'doc10', title: 'Workers', text: 'Quantized ingest runs the CPU-heavy Hadamard rotation + quantization in a Web Worker. This keeps the main thread responsive during large ingests. Falls back to main thread if Workers are unavailable.' },
+];
+
+let db;
+let currentDocId = null;
+
+// Scroll chat to bottom
+function scrollChat() {
+  const panel = $('chat').closest('.panel');
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function addMessage(role, text, contextDocs = []) {
+  const chat = $('chat');
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.innerHTML = text;
+  if (contextDocs.length > 0) {
+    div.innerHTML += `<div class="context">Context: ${contextDocs.map(d => `<span class="badge">${d}</span>`).join(' ')}</div>`;
+  }
+  chat.appendChild(div);
+  scrollChat();
+}
+
+// Render available documents
+function renderDocs() {
+  const list = $('docList');
+  list.innerHTML = '';
+  for (const doc of DOCUMENTS) {
+    const li = document.createElement('li');
+    li.textContent = doc.title;
+    li.dataset.id = doc.id;
+    li.onclick = async () => {
+      if (li.classList.contains('active')) return;
+      li.classList.add('active');
+      log(`Ingesting "${doc.title}"...`);
+      await db.addText({ id: doc.id, text: doc.text, metadata: { title: doc.title, text: doc.text } });
+      addMessage('assistant', `Added **${doc.title}** to the knowledge base. I now know about ${db.count} topics.`);
+      log(`Ready — ${db.count} documents indexed`, 'ok');
+    };
+    list.appendChild(li);
+  }
+}
+
+async function answerQuestion(query) {
+  if (!query.trim()) return;
+
+  const input = $('queryInput');
+  const btn = $('sendBtn');
+  input.disabled = true;
+  btn.disabled = true;
+
+  addMessage('user', query);
+
+  try {
+    // Retrieve relevant context
+    const hits = await db.queryText(query, { k: 3 });
+    console.log(hits)
+    const contexts = hits.map(h => ({
+      title: h.metadata?.title ?? 'unknown',
+      text: h.metadata?.text ?? '',
+      score: h.score,
+    }));
+
+    // Build a simple response based on retrieved context
+    let response;
+    if (contexts.length === 0 || contexts[0].score < 0.1) {
+      response = "I couldn't find relevant information in my knowledge base. Try adding more documents.";
+    } else {
+      // Use the top context to generate an answer
+      const top = contexts[0];
+      console.log(contexts)
+      response = `Based on the documentation, here's what I found about that:\n\n> ${top.text}`;
+
+      // Add supplementary info from other hits
+      if (contexts.length > 1 && contexts[1].score > 0.3) {
+        response += `\n\nAlso relevant: ${contexts[1].title} — ${contexts[1].text.split('.')[0]}.`;
+      }
+    }
+
+    addMessage('assistant', response, contexts.map(c => c.title));
+  } catch (e) {
+    addMessage('assistant', `Error: ${e.message}`);
+  }
+
+  input.disabled = false;
+  btn.disabled = false;
+  input.focus();
+}
+
+async function init() {
+  log('Checking WebGPU...');
+  if (!BrowserVec.isSupported().webgpu) {
+    log('WebGPU not available.', 'err');
+    return;
+  }
+
+  log('Creating embedder and store...');
+  const embedder = hashingEmbedder({ dimension: 384 });
+
+  db = await BrowserVec.create({
+    dimension: 384,
+    metric: 'cosine',
+    embedder,
+  });
+
+  renderDocs();
+
+  $('queryInput').disabled = false;
+  $('sendBtn').disabled = false;
+  log('Ready — click a document to add it, then ask questions.', 'ok');
+
+  // Send on Enter
+  $('queryInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') answerQuestion($('queryInput').value);
+  });
+  $('sendBtn').addEventListener('click', () => answerQuestion($('queryInput').value));
+}
+
+init();
+</script>
+</body>
+</html>

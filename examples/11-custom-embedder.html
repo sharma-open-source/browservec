@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 11. Custom embedder</title>
+<style>body{font:14px/1.5 ui-monospace,monospace;margin:2rem;max-width:780px}pre{background:#111;color:#b9f;padding:1rem;border-radius:6px;overflow:auto}button{font:inherit;padding:.4rem .8rem;cursor:pointer}.ok{color:#5c5}.bad{color:#f55}.dim{color:#888}.hl{color:#fe9}h2{font-size:1.1rem;border-bottom:1px solid #333;padding-bottom:.25rem}</style>
+</head>
+<body>
+<h1>11. Custom embedder (M5)</h1>
+<p class="dim">The <code>Embedder</code> interface accepts any object with <code>{ dimension, embed(texts): Promise<Float32Array[]> }</code>. This lets you plug in a remote API, a custom model, a random baseline, or any other embedding source.</p>
+
+<pre id="out">ready.</pre>
+
+<button id="run">Run custom embedder demo</button>
+
+<script type="module">
+import { BrowserVec } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const out = $('out');
+const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`);
+
+$('run').onclick = async () => {
+  out.textContent = '';
+  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+  // ---- Example 1: Random embedder (baseline / test) ----
+  log(`=== Custom embedder: Random ===`);
+  log(`(Each text maps to a random unit vector — no signal, just demonstrates the API)`, 'dim');
+
+  const randomEmbedder = {
+    dimension: 64,
+    async embed(texts) {
+      return texts.map(() => {
+        const v = new Float32Array(64);
+        let s = 0;
+        for (let i = 0; i < 64; i++) { v[i] = Math.random() * 2 - 1; s += v[i] * v[i]; }
+        const inv = 1 / (Math.sqrt(s) || 1);
+        for (let i = 0; i < 64; i++) v[i] *= inv;
+        return v;
+      });
+    },
+  };
+
+  const db = await BrowserVec.create({ dimension: 64, metric: 'cosine', embedder: randomEmbedder });
+  await db.addTexts([
+    { id: 'a', text: 'first document' },
+    { id: 'b', text: 'second document' },
+    { id: 'c', text: 'third document' },
+  ]);
+  log(`random embedder: ingested ${db.count} docs`);
+  db.destroy();
+
+  // ---- Example 2: Simple word-count embedder ----
+  log(`\n=== Custom embedder: Word-count bag-of-words ===`);
+  log(`(Counts word occurrences into a 100-dim vector — illustrates the concept)`, 'dim');
+
+  function bowEmbedder(vocabSize = 100) {
+    return {
+      dimension: vocabSize,
+      async embed(texts) {
+        return texts.map((text) => {
+          const v = new Float32Array(vocabSize);
+          const words = text.toLowerCase().split(/[^a-z]+/).filter(Boolean);
+          for (const w of words) {
+            let h = 0;
+            for (let i = 0; i < w.length; i++) h = ((h << 5) - h + w.charCodeAt(i)) | 0;
+            const idx = Math.abs(h) % vocabSize;
+            v[idx]++;
+          }
+          let s = 0;
+          for (let i = 0; i < vocabSize; i++) s += v[i] * v[i];
+          const inv = 1 / (Math.sqrt(s) || 1);
+          for (let i = 0; i < vocabSize; i++) v[i] *= inv;
+          return v;
+        });
+      },
+    };
+  }
+
+  const bow = bowEmbedder(100);
+  const db2 = await BrowserVec.create({ dimension: 100, metric: 'cosine', embedder: bow });
+  await db2.addTexts([
+    { id: 'd1', text: 'apple banana cherry date', metadata: { topic: 'fruit' } },
+    { id: 'd2', text: 'apple apple banana banana', metadata: { topic: 'fruit' } },
+    { id: 'd3', text: 'dog elephant fox giraffe', metadata: { topic: 'animals' } },
+    { id: 'd4', text: 'dog dog fox fox giraffe', metadata: { topic: 'animals' } },
+  ]);
+
+  // Query with BOW embedder — matches by word overlap
+  for (const q of ['apple banana', 'dog fox giraffe']) {
+    const hits = await db2.queryText(q, { k: 2 });
+    log(`query: "${q}"`);
+    for (const h of hits) log(`  ${h.score.toFixed(3)}  ${h.metadata?.topic}: ${h.id}`, 'dim');
+  }
+
+  db2.destroy();
+
+  // ---- Example 3: Pass-through embedder (precomputed vectors) ----
+  log(`\n=== Custom embedder: Pass-through ===`);
+  log(`(Use embedder only for queryText, supply vectors directly in addBatch)`, 'dim');
+
+  // The embedder must convert query text to a vector. For addBatch/add we
+  // can supply our own vectors and skip the embedder entirely.
+  // Here the embedder just maps known queries to fixed vectors for demo.
+  const fixedEmbedder = {
+    dimension: 4,
+    async embed(texts) {
+      return texts.map((t) => {
+        if (t === 'red') return new Float32Array([1, 0, 0, 0]);
+        if (t === 'green') return new Float32Array([0, 1, 0, 0]);
+        if (t === 'blue') return new Float32Array([0, 0, 1, 0]);
+        return new Float32Array([0, 0, 0, 1]); // unknown
+      });
+    },
+  };
+
+  const db3 = await BrowserVec.create({ dimension: 4, metric: 'cosine', embedder: fixedEmbedder });
+
+  // Add vectors directly (not via addText):
+  await db3.addBatch([
+    { id: 'apple', vector: new Float32Array([1, 0, 0, 0]), metadata: { label: 'red fruit' } },
+    { id: 'grass', vector: new Float32Array([0, 1, 0, 0]), metadata: { label: 'green thing' } },
+    { id: 'sky', vector: new Float32Array([0, 0, 1, 0]), metadata: { label: 'blue thing' } },
+  ]);
+
+  // Query via text (embedder converts "red" -> [1,0,0,0]):
+  const hits = await db3.queryText('red', { k: 3 });
+  log(`queryText('red'):`);
+  for (const h of hits) log(`  ${h.score.toFixed(3)}  ${h.id} (${h.metadata?.label})`, 'dim');
+
+  db3.destroy();
+
+  log(`\n--- Summary ---`);
+  log(`The Embedder interface is just { dimension, embed(texts): Promise<Float32Array[]> }.`);
+  log(`Use it with remote APIs (OpenAI, Cohere), custom models, or test harnesses.`, 'ok');
+};
+</script>
+</body>
+</html>

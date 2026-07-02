@@ -1,0 +1,58 @@
+{
+  "name": "browservec",
+  "version": "0.1.0",
+  "description": "In-browser WebGPU vector store with custom kernels for fast offline retrieval",
+  "type": "module",
+  "license": "MIT",
+  "author": "Sharma SK <skss.vfx@gmail.com>",
+  "main": "./dist/browservec.js",
+  "module": "./dist/browservec.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/browservec.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sharma-open-source/browservec.git"
+  },
+  "homepage": "https://github.com/sharma-open-source/browservec#readme",
+  "bugs": {
+    "url": "https://github.com/sharma-open-source/browservec/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "keywords": [
+    "webgpu",
+    "vector",
+    "vector-database",
+    "embeddings",
+    "ann",
+    "similarity-search",
+    "rag",
+    "offline",
+    "wgsl"
+  ],
+  "devDependencies": {
+    "@webgpu/types": "^0.1.40",
+    "typescript": "~5.6.0",
+    "vite": "^5.2.0"
+  }
+}

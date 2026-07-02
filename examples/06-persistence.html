@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 06. Persistence</title>
+<style>body{font:14px/1.5 ui-monospace,monospace;margin:2rem;max-width:780px}pre{background:#111;color:#b9f;padding:1rem;border-radius:6px;overflow:auto}button{font:inherit;padding:.4rem .8rem;cursor:pointer}.ok{color:#5c5}.bad{color:#f55}.dim{color:#888}.hl{color:#fe9}h2{font-size:1.1rem;border-bottom:1px solid #333;padding-bottom:.25rem}</style>
+</head>
+<body>
+<h1>06. Persistence (M2)</h1>
+<p class="dim">Save a store to <b>OPFS</b> (File System Access API) or fallback to <b>IndexedDB</b>; reload it on a cold start. Export to a single binary blob and import it elsewhere. Vectors are persisted already normalized so query results are exactly reproducible.</p>
+
+<pre id="out">ready.</pre>
+
+<p>
+<label>vectors <input id="n" type="number" value="3000" /></label>
+<label>dim <input id="dim" type="number" value="64" /></label>
+<button id="run">Test persistence round-trip</button>
+</p>
+
+<script type="module">
+import { BrowserVec } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const out = $('out');
+const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`);
+const rand = (dim) => { const v = new Float32Array(dim); for (let i = 0; i < dim; i++) v[i] = Math.random() * 2 - 1; return v; };
+
+$('run').onclick = async () => {
+  out.textContent = '';
+  const support = BrowserVec.isSupported();
+  log(`support: ${JSON.stringify(support)}`);
+  if (!support.webgpu) return log('WebGPU not available.', 'bad');
+  if (!support.opfs) log('OPFS unavailable — will use IndexedDB fallback.', 'dim');
+
+  const n = +$('n').value;
+  const dim = +$('dim').value;
+  const name = 'example-session';
+  const records = Array.from({ length: n }, (_, i) => ({
+    id: `doc-${i}`, vector: rand(dim), metadata: { idx: i },
+  }));
+  const probe = records[42].vector;
+
+  // 1. CREATE + INGEST + SAVE
+  log(`\n--- Phase 1: Create, ingest, save ---`);
+  let t = performance.now();
+  let db = await BrowserVec.create({ dimension: dim, persist: { name } });
+  await db.addBatch(records);
+  const ingestMs = performance.now() - t;
+  log(`ingested ${db.count} vectors in ${ingestMs.toFixed(0)} ms`);
+
+  t = performance.now();
+  await db.save();
+  const saveMs = performance.now() - t;
+  const backend = db.stats().persist;
+  log(`saved to ${backend} in ${saveMs.toFixed(1)} ms`, 'ok');
+
+  // Record query results before destroy.
+  const before = (await db.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+  log(`query before destroy: [${before}]`, 'dim');
+  db.destroy();
+
+  // 2. COLD-START RELOAD
+  log(`\n--- Phase 2: Cold-start reload ---`);
+  t = performance.now();
+  const db2 = await BrowserVec.create({ dimension: dim, persist: { name } });
+  const loadMs = performance.now() - t;
+  log(`reloaded ${db2.count} vectors in ${loadMs.toFixed(1)} ms`, db2.count === n ? 'ok' : 'bad');
+
+  const after = (await db2.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+  log(`query after reload: [${after}]`);
+  log(`results match: ${before === after ? 'YES' : 'NO'}`, before === after ? 'ok' : 'bad');
+
+  // 3. EXPORT to blob
+  log(`\n--- Phase 3: Export / Import ---`);
+  t = performance.now();
+  const blob = await db2.export();
+  const exportMs = performance.now() - t;
+  log(`exported ${(blob.size / 1024).toFixed(1)} KiB in ${exportMs.toFixed(0)} ms`, 'dim');
+
+  const db3 = await BrowserVec.import(blob);
+  const imported = (await db3.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+  log(`imported: ${db3.count} vectors`);
+  log(`import query: [${imported}]`, imported === before ? 'ok' : 'bad');
+
+  // 4. CLEANUP — remove persisted data
+  log(`\n--- Cleanup ---`);
+  // Note: BrowserVec doesn't currently expose a deleteStorage() method.
+  // Persisted data remains in OPFS/IndexedDB. To remove manually, clear
+  // site storage in dev tools.
+  log(`persisted data remains in ${backend} under key "${name}"`, 'dim');
+
+  db2.destroy();
+  db3.destroy();
+  log(`\npersistence round-trip complete.`, 'ok');
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — Examples</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; margin: 2rem auto; max-width: 780px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.1rem; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: .25rem; }
+  p { color: #555; margin-top: .25rem; }
+  ul { padding: 0; list-style: none; }
+  li { margin: .5rem 0; }
+  a { display: block; padding: .5rem .75rem; background: #f5f5f5; border-radius: 6px; text-decoration: none; color: #1a73e8; font-weight: 500; }
+  a:hover { background: #e8e8e8; }
+  a small { font-weight: 400; color: #666; display: block; font-size: .85rem; margin-top: .15rem; }
+  .tag { display: inline-block; font-size: .7rem; padding: .1rem .45rem; border-radius: 4px; background: #e3f2fd; color: #1565c0; margin-right: .3rem; font-weight: 600; }
+  .tag.real { background: #fff8e1; color: #f57f17; }
+  .tag.m1 { background: #e8f5e9; color: #2e7d32; }
+  .tag.m2 { background: #fff3e0; color: #e65100; }
+  .tag.m3 { background: #fce4ec; color: #c62828; }
+  .tag.m4 { background: #f3e5f5; color: #6a1b9a; }
+  .tag.m5 { background: #e0f2f1; color: #00695c; }
+  .tag.m6 { background: #fbe9e7; color: #bf360c; }
+  .tag.nfr { background: #eceff1; color: #37474f; }
+</style>
+</head>
+<body>
+<h1>BrowserVec Examples</h1>
+<p>In-browser WebGPU vector store — learn every concept through runnable examples.</p>
+
+<h2>Real-world use cases</h2>
+<ul>
+  <li><a href="rag-chat-assistant.html"><span class="tag real">RAG</span> RAG chat assistant <small>Ingest documents, retrieve relevant context for LLM prompts — fully offline</small></a></li>
+  <li><a href="personal-knowledge-base.html"><span class="tag real">App</span> Personal knowledge base <small>Semantic note search with persistence — your notes survive reload</small></a></li>
+  <li><a href="movie-recommender.html"><span class="tag real">Recs</span> Movie recommender <small>Find similar films by description — like "more like this"</small></a></li>
+  <li><a href="code-snippet-search.html"><span class="tag real">Dev</span> Code snippet search <small>Search code by intent, not keywords — "find the sort function"</small></a></li>
+  <li><a href="faq-support-bot.html"><span class="tag real">FAQ</span> Customer support FAQ <small>Semantic FAQ matching — users type a problem, get the right answer</small></a></li>
+</ul>
+
+<h2>Core concepts</h2>
+<ul>
+  <li><a href="01-basic-flat.html"><span class="tag m1">M1</span> Basic flat search <small>fp32 brute-force GPU scan with cosine, dot, and L2 metrics</small></a></li>
+  <li><a href="02-quantization.html"><span class="tag m3">M3</span> TurboQuant quantization <small>int8 / int4 quantized storage with asymmetric query + exact re-rank</small></a></li>
+  <li><a href="03-ivf-index.html"><span class="tag m4">M4</span> IVF approximate index <small>cluster-based ANN, nprobe sweep, recall vs speed trade-off</small></a></li>
+  <li><a href="04-ivf-quant-combo.html"><span class="tag m4">M4</span> IVF × quant combo <small>clustered + quantized — the 1M-vector path with int8 or int4</small></a></li>
+</ul>
+
+<h2>Text &amp; embeddings</h2>
+<ul>
+  <li><a href="05-text-retrieval.html"><span class="tag m5">M5</span> Text retrieval <small>end-to-end offline text→search with hashing embedder</small></a></li>
+  <li><a href="11-custom-embedder.html"><span class="tag m5">M5</span> Custom embedder <small>implement the Embedder interface to plug in any embedding source</small></a></li>
+  <li><a href="12-transformers-embedder.html"><span class="tag m5">M5</span> Transformers.js embedder <small>real semantic embeddings via Xenova/all-MiniLM-L6-v2</small></a></li>
+</ul>
+
+<h2>Persistence &amp; encryption</h2>
+<ul>
+  <li><a href="06-persistence.html"><span class="tag m2">M2</span> Persistence <small>save/load to OPFS/IndexedDB, export/import as blob, cold-start reload</small></a></li>
+  <li><a href="07-encryption.html"><span class="tag m6">M6</span> Encryption at rest <small>AES-256-GCM encrypted snapshots with PBKDF2 passphrase</small></a></li>
+</ul>
+
+<h2>Data management</h2>
+<ul>
+  <li><a href="08-deletion-compaction.html"><span class="tag m1">M1</span> Delete &amp; compaction <small>tombstone deletes, update (upsert), compact(), over-fetch past tombstones</small></a></li>
+  <li><a href="13-all-metrics.html"><span class="tag m1">M1</span> Metric comparison <small>cosine vs dot vs L2 — same data, different scoring</small></a></li>
+  <li><a href="14-advanced-api.html"><span class="tag m1">M1</span> Advanced API <small>isSupported, stats, dimension config, destroy lifecycle</small></a></li>
+</ul>
+
+<h2>Performance &amp; scale</h2>
+<ul>
+  <li><a href="09-worker-ingest.html"><span class="tag nfr">NFR-8</span> Worker ingest <small>rotate+quantize offloaded to a Web Worker — no main-thread freeze</small></a></li>
+  <li><a href="10-chunking.html"><span class="tag nfr">NFR-10</span> Corpus chunking <small>spread vectors across multiple GPU buffers past the per-buffer limit</small></a></li>
+  <li><a href="perf-benchmark.html"><span class="tag" style="background:#fce4ec;color:#b71c1c;">Bench</span> Performance benchmark <small>Large-scale perf test: ingest rate, query latency, recall across index types</small></a></li>
+</ul>
+
+<p style="margin-top: 2rem; color: #999; font-size: .85rem;">Open each in a WebGPU-capable browser after running <code>npm run dev</code>.</p>
+</body>
+</html>

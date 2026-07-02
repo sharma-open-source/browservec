@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — Code Snippet Search</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 860px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  .subtitle { color: #666; margin-top: 0; font-size: .9rem; }
+  .toolbar { display: flex; gap: .5rem; margin: 1rem 0; }
+  .toolbar input { flex: 1; padding: .5rem; border: 1px solid #ddd; border-radius: 6px; font: inherit; }
+  .toolbar select { padding: .5rem; border: 1px solid #ddd; border-radius: 6px; font: inherit; background: #fff; }
+  .toolbar button { padding: .5rem 1rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font: inherit; }
+  .stats { font-size: .8rem; color: #888; margin-bottom: 1rem; }
+  .results { display: flex; flex-direction: column; gap: .5rem; }
+  .snippet { border: 1px solid #eee; border-radius: 8px; padding: .75rem; }
+  .snippet h3 { margin: 0 0 .25rem 0; font-size: .9rem; display: flex; gap: .5rem; align-items: center; }
+  .snippet .lang { font-size: .7rem; padding: .1rem .4rem; border-radius: 4px; background: #e3f2fd; color: #1565c0; }
+  .snippet .desc { font-size: .8rem; color: #666; margin-bottom: .25rem; }
+  .snippet pre { background: #f5f5f5; padding: .5rem; border-radius: 4px; font-size: .8rem; overflow-x: auto; margin: .25rem 0; }
+  .snippet .score { font-size: .75rem; color: #1a73e8; }
+  .snippet .tags { margin-top: .25rem; }
+  .snippet .tags span { display: inline-block; font-size: .65rem; padding: .1rem .35rem; border-radius: 3px; background: #f3e5f5; color: #6a1b9a; margin-right: .2rem; }
+  .empty { color: #999; text-align: center; padding: 2rem; }
+</style>
+</head>
+<body>
+<h1>Code Snippet Search</h1>
+<p class="subtitle">Search your code snippets by intent — "find something that sorts arrays" or "how do I read a file".</p>
+
+<div class="toolbar">
+  <input id="searchInput" type="text" placeholder="e.g. 'sort an array', 'read a file', 'make an HTTP request'..." />
+  <select id="langFilter">
+    <option value="">All languages</option>
+    <option value="javascript">JavaScript</option>
+    <option value="python">Python</option>
+    <option value="rust">Rust</option>
+    <option value="typescript">TypeScript</option>
+  </select>
+  <button id="searchBtn">Search</button>
+</div>
+
+<div class="stats" id="stats">Indexing ${SNIPPETS.length} code snippets...</div>
+<div class="results" id="results"></div>
+
+<script type="module">
+import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+
+const SNIPPETS = [
+  { id: 's1', title: 'Quick sort', lang: 'javascript', tags: ['sort', 'array', 'algorithm'], code: `function quickSort(arr) {\n  if (arr.length <= 1) return arr;\n  const pivot = arr[arr.length - 1];\n  const left = [], right = [];\n  for (let i = 0; i < arr.length - 1; i++) {\n    if (arr[i] < pivot) left.push(arr[i]);\n    else right.push(arr[i]);\n  }\n  return [...quickSort(left), pivot, ...quickSort(right)];\n}`, desc: 'Quick sort implementation for arrays' },
+  { id: 's2', title: 'Read file', lang: 'python', tags: ['file', 'io', 'read'], code: `with open('file.txt', 'r') as f:\n    content = f.read()\n    print(content)`, desc: 'Read contents of a text file' },
+  { id: 's3', title: 'HTTP GET request', lang: 'javascript', tags: ['http', 'fetch', 'api'], code: `fetch('https://api.example.com/data')\n  .then(res => res.json())\n  .then(data => console.log(data))\n  .catch(err => console.error(err));`, desc: 'Make an HTTP GET request using fetch' },
+  { id: 's4', title: 'Binary search', lang: 'typescript', tags: ['search', 'binary', 'algorithm'], code: `function binarySearch<T>(arr: T[], target: T): number {\n  let lo = 0, hi = arr.length - 1;\n  while (lo <= hi) {\n    const mid = (lo + hi) >>> 1;\n    if (arr[mid] === target) return mid;\n    if (arr[mid] < target) lo = mid + 1;\n    else hi = mid - 1;\n  }\n  return -1;\n}`, desc: 'Binary search on a sorted array' },
+  { id: 's5', title: 'String reverse', lang: 'javascript', tags: ['string', 'reverse'], code: `const reverse = (str) => str.split('').reverse().join('');`, desc: 'Reverse a string' },
+  { id: 's6', title: 'Write to file', lang: 'python', tags: ['file', 'io', 'write'], code: `with open('output.txt', 'w') as f:\n    f.write('Hello, world!')`, desc: 'Write text to a file' },
+  { id: 's7', title: 'Debounce function', lang: 'javascript', tags: ['debounce', 'performance', 'events'], code: `function debounce(fn, ms) {\n  let timer;\n  return (...args) => {\n    clearTimeout(timer);\n    timer = setTimeout(() => fn(...args), ms);\n  };\n}`, desc: 'Create a debounced version of a function' },
+  { id: 's8', title: 'Array map', lang: 'typescript', tags: ['array', 'map', 'transform'], code: `const doubled = numbers.map(x => x * 2);`, desc: 'Transform array elements with map' },
+  { id: 's9', title: 'Read CSV file', lang: 'python', tags: ['csv', 'file', 'data'], code: `import csv\nwith open('data.csv', 'r') as f:\n    reader = csv.DictReader(f)\n    for row in reader:\n        print(row)`, desc: 'Parse a CSV file using the csv module' },
+  { id: 's10', title: 'Async await', lang: 'javascript', tags: ['async', 'promise', 'await'], code: `async function getData(url) {\n  try {\n    const res = await fetch(url);\n    return await res.json();\n  } catch (err) {\n    console.error('Failed:', err);\n  }\n}`, desc: 'Async/await pattern for fetching data' },
+  { id: 's11', title: 'Thread pool', lang: 'rust', tags: ['thread', 'concurrency', 'parallel'], code: `use std::thread;\n\nlet handles: Vec<_> = (0..10).map(|i| {\n    thread::spawn(move || {\n        println!("Thread {i} running");\n        i * 2\n    })\n}).collect();\n\nfor h in handles {\n    println!("Result: {}", h.join().unwrap());\n}`, desc: 'Create a thread pool and run tasks in parallel' },
+  { id: 's12', title: 'Filter array', lang: 'typescript', tags: ['array', 'filter'], code: `const evens = numbers.filter(n => n % 2 === 0);`, desc: 'Filter array elements by a condition' },
+  { id: 's13', title: 'Regex match', lang: 'javascript', tags: ['regex', 'string', 'pattern'], code: `const email = 'user@example.com';\nconst isValid = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email);`, desc: 'Validate email address with regex' },
+  { id: 's14', title: 'Dijkstra shortest path', lang: 'python', tags: ['graph', 'algorithm', 'path'], code: `import heapq\n\ndef dijkstra(graph, start):\n    dist = {node: float('inf') for node in graph}\n    dist[start] = 0\n    pq = [(0, start)]\n    while pq:\n        d, u = heapq.heappop(pq)\n        if d > dist[u]: continue\n        for v, w in graph[u].items():\n            nd = d + w\n            if nd < dist[v]:\n                dist[v] = nd\n                heapq.heappush(pq, (nd, v))\n    return dist`, desc: 'Dijkstra\'s shortest path algorithm' },
+  { id: 's15', title: 'Read file lines', lang: 'rust', tags: ['file', 'io', 'read'], code: `use std::fs::File;\nuse std::io::{BufRead, BufReader};\n\nlet file = File::open("data.txt")?;\nlet reader = BufReader::new(file);\nfor line in reader.lines() {\n    println!("{}", line?);\n}`, desc: 'Read a file line by line' },
+  { id: 's16', title: 'FizzBuzz', lang: 'javascript', tags: ['interview', 'loop'], code: `for (let i = 1; i <= 100; i++) {\n  const f = i % 3 === 0, b = i % 5 === 0;\n  console.log(f && b ? 'FizzBuzz' : f ? 'Fizz' : b ? 'Buzz' : i);\n}`, desc: 'Classic FizzBuzz interview problem' },
+  { id: 's17', title: 'SHA256 hash', lang: 'python', tags: ['hash', 'crypto', 'security'], code: `import hashlib\nhash = hashlib.sha256(b"hello").hexdigest()\nprint(hash)`, desc: 'Compute SHA256 hash of a string' },
+  { id: 's18', title: 'Flatten nested array', lang: 'javascript', tags: ['array', 'flatten', 'recursion'], code: `function flatten(arr) {\n  return arr.reduce((acc, val) =>\n    Array.isArray(val) ? acc.concat(flatten(val)) : acc.concat(val), []);\n}`, desc: 'Recursively flatten nested arrays' },
+  { id: 's19', title: 'HTTP server', lang: 'rust', tags: ['http', 'server', 'web'], code: `use actix_web::{web, App, HttpServer, Responder};\n\nasync fn hello() -> impl Responder {\n    "Hello, World!"\n}\n\n#[actix_web::main]\nasync fn main() -> std::io::Result<()> {\n    HttpServer::new(|| App::new().route("/", web::get().to(hello)))\n        .bind("127.0.0.1:8080")?\n        .run()\n        .await\n}`, desc: 'Simple HTTP server in Rust' },
+  { id: 's20', title: 'JSON parse', lang: 'javascript', tags: ['json', 'parse', 'serialize'], code: `const data = JSON.parse(jsonString);\nconst str = JSON.stringify(obj, null, 2);`, desc: 'Parse and stringify JSON' },
+];
+
+let db;
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+async function search(query, lang) {
+  if (!db || db.count === 0) return;
+
+  let hits;
+  if (query.trim()) {
+    hits = await db.queryText(query, { k: 30 });
+  } else {
+    // Show all (query a common word to get everything)
+    hits = await db.queryText('code', { k: 50 });
+  }
+
+  let filtered = hits;
+  if (lang) {
+    filtered = filtered.filter(h => h.metadata?.lang === lang);
+  }
+
+  const container = $('results');
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="empty">No matching snippets found.</div>';
+    $('stats').textContent = `${db.count} snippets — no matches for "${query}"`;
+    return;
+  }
+
+  container.innerHTML = filtered.map(h => {
+    const s = SNIPPETS.find(s => s.id === h.id);
+    if (!s) return '';
+    return `
+      <div class="snippet">
+        <h3>
+          <span>${escapeHtml(s.title)}</span>
+          <span class="lang">${s.lang}</span>
+        </h3>
+        <div class="desc">${escapeHtml(s.desc)}</div>
+        <pre>${escapeHtml(s.code)}</pre>
+        <div class="tags">${s.tags.map(t => `<span>${t}</span>`).join('')}</div>
+        ${query.trim() ? `<div class="score">Relevance: ${(h.score * 100).toFixed(0)}%</div>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  $('stats').textContent = `${db.count} snippets — ${filtered.length} match${query ? ' "' + query + '"' : ''}`;
+}
+
+async function init() {
+  $('stats').textContent = 'Checking WebGPU...';
+  if (!BrowserVec.isSupported().webgpu) {
+    $('stats').textContent = 'WebGPU not available.';
+    return;
+  }
+
+  $('stats').textContent = `Indexing ${SNIPPETS.length} code snippets...`;
+
+  const embedder = hashingEmbedder({ dimension: 384 });
+  db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder });
+
+  await db.addTexts(SNIPPETS.map(s => ({
+    id: s.id,
+    text: `${s.title}. ${s.desc}. ${s.tags.join(' ')}. Language: ${s.lang}. Code: ${s.code}`,
+    metadata: { title: s.title, lang: s.lang, tags: s.tags.join(', ') },
+  })));
+
+  $('stats').textContent = `${db.count} code snippets indexed`;
+  await search('', '');
+
+  $('searchBtn').onclick = () => search($('searchInput').value, $('langFilter').value);
+  $('searchInput').onkeydown = (e) => { if (e.key === 'Enter') search($('searchInput').value, $('langFilter').value); };
+  $('langFilter').onchange = () => search($('searchInput').value, $('langFilter').value);
+
+  // Seed with a default search
+  setTimeout(() => search('sort an array', ''), 300);
+}
+
+init();
+</script>
+</body>
+</html>

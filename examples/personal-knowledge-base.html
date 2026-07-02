@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — Personal Knowledge Base</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 800px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  .subtitle { color: #666; margin-top: 0; font-size: .9rem; }
+  .toolbar { display: flex; gap: .5rem; margin: 1rem 0; flex-wrap: wrap; }
+  .toolbar input, .toolbar textarea { padding: .5rem; border: 1px solid #ddd; border-radius: 6px; font: inherit; }
+  .toolbar input[type="text"] { flex: 1; min-width: 200px; }
+  .toolbar textarea { width: 100%; min-height: 60px; resize: vertical; }
+  .toolbar button { padding: .5rem 1rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font: inherit; white-space: nowrap; }
+  .toolbar button:disabled { opacity: .5; cursor: not-allowed; }
+  .toolbar button.danger { background: #d32f2f; }
+  .toolbar button.secondary { background: #f5f5f5; color: #333; border: 1px solid #ddd; }
+  .stats { font-size: .8rem; color: #888; margin-bottom: 1rem; }
+  .notes { display: flex; flex-direction: column; gap: .5rem; }
+  .note { border: 1px solid #eee; border-radius: 8px; padding: .75rem; }
+  .note h3 { margin: 0 0 .25rem 0; font-size: .95rem; }
+  .note .meta { font-size: .75rem; color: #999; margin-bottom: .25rem; }
+  .note .text { font-size: .85rem; color: #444; white-space: pre-wrap; }
+  .note .score { font-size: .75rem; color: #1a73e8; }
+  .note .tags { margin-top: .25rem; }
+  .note .tags span { display: inline-block; font-size: .7rem; padding: .1rem .4rem; border-radius: 4px; background: #e3f2fd; color: #1565c0; margin-right: .2rem; }
+  .search-mode { font-size: .8rem; color: #888; margin-bottom: .5rem; }
+  .search-mode label { margin-right: 1rem; cursor: pointer; }
+  .empty { color: #999; text-align: center; padding: 2rem; }
+  .badge { display: inline-block; font-size: .7rem; padding: .1rem .4rem; border-radius: 4px; background: #e8f5e9; color: #2e7d32; margin-right: .3rem; }
+</style>
+</head>
+<body>
+<h1>Personal Knowledge Base</h1>
+<p class="subtitle">Store notes with semantic search — type a thought, find related ones. Data persists across sessions.</p>
+
+<div class="stats" id="stats">Initializing...</div>
+
+<div class="toolbar">
+  <input id="noteTitle" type="text" placeholder="Note title..." />
+  <textarea id="noteText" placeholder="Write your note content here..."></textarea>
+  <input id="noteTags" type="text" placeholder="tags (comma-separated)" />
+  <div style="display: flex; gap: .5rem; width: 100%;">
+    <button id="addBtn">Add Note</button>
+    <button id="saveBtn" class="secondary">Save to Disk</button>
+    <button id="clearBtn" class="danger">Clear All</button>
+  </div>
+</div>
+
+<div class="search-mode">
+  <label><input type="radio" name="searchMode" value="semantic" checked /> Semantic search</label>
+  <label><input type="radio" name="searchMode" value="all" /> Show all</label>
+</div>
+
+<input id="searchInput" type="text" placeholder="Search your notes by meaning..." style="width:100%;padding:.5rem;border:1px solid #ddd;border-radius:6px;font:inherit;margin-bottom:1rem;" />
+
+<div class="notes" id="notes"></div>
+
+<script type="module">
+import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const STORE_NAME = 'my-knowledge-base';
+let db;
+
+function renderNotes(results, isSearch) {
+  const container = $('notes');
+  if (results.length === 0) {
+    container.innerHTML = '<div class="empty">' + (isSearch ? 'No matching notes found.' : 'No notes yet. Add one above!') + '</div>';
+    return;
+  }
+  container.innerHTML = results.map(r => `
+    <div class="note">
+      <h3>${escapeHtml(r.metadata?.title || 'Untitled')}</h3>
+      <div class="meta">${r.metadata?.timestamp || ''} ${r.metadata?.tags ? '— ' + r.metadata.tags : ''}</div>
+      <div class="text">${escapeHtml(r.metadata?.text || '')}</div>
+      ${isSearch ? `<div class="score">Relevance: ${(r.score * 100).toFixed(0)}%</div>` : ''}
+    </div>
+  `).join('');
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+async function search(query) {
+  const isSemantic = document.querySelector('input[name="searchMode"]:checked').value === 'semantic';
+
+  if (db.count === 0) {
+    renderNotes([], false);
+    return;
+  }
+
+  let results;
+  if (isSemantic && query.trim()) {
+    results = await db.queryText(query, { k: 20 });
+    results = results.filter(r => r.score > 0.05);
+  } else {
+    // "Show all" mode or empty query — return everything
+    // For show-all, we use a dummy query that matches everything
+    if (query.trim()) {
+      results = await db.queryText(query, { k: 50 });
+    } else {
+      // Use a neutral query to get all notes sorted by recency
+      // Since we store notes with text, we just query a common word
+      results = await db.queryText('the', { k: 50 });
+    }
+  }
+  renderNotes(results, isSemantic);
+  $('stats').textContent = `${db.count} notes${isSemantic && query.trim() ? ` — ${results.length} matches` : ''}`;
+}
+
+async function addNote() {
+  const title = $('noteTitle').value.trim();
+  const text = $('noteText').value.trim();
+  if (!title || !text) return;
+
+  const tags = $('noteTags').value.split(',').map(t => t.trim()).filter(Boolean).join(', ');
+  const id = 'note-' + Date.now();
+  const timestamp = new Date().toLocaleString();
+
+  await db.addText({
+    id,
+    text: `${title}. ${text}`,
+    metadata: { title, text, tags, timestamp },
+  });
+
+  $('noteTitle').value = '';
+  $('noteText').value = '';
+  $('noteTags').value = '';
+  $('stats').textContent = `${db.count} notes`;
+  await search($('searchInput').value);
+}
+
+async function init() {
+  $('stats').textContent = 'Checking WebGPU...';
+  if (!BrowserVec.isSupported().webgpu) {
+    $('stats').textContent = 'WebGPU not available.';
+    return;
+  }
+
+  $('stats').textContent = 'Loading knowledge base...';
+
+  const embedder = hashingEmbedder({ dimension: 384 });
+
+  // Load existing store or create a fresh one
+  db = await BrowserVec.create({
+    dimension: 384,
+    metric: 'cosine',
+    embedder,
+    persist: { name: STORE_NAME, autoLoad: true },
+  });
+
+  $('stats').textContent = `${db.count} notes loaded`;
+  if (db.count > 0) await search('');
+
+  // Event handlers
+  $('addBtn').onclick = addNote;
+  $('saveBtn').onclick = async () => {
+    $('saveBtn').textContent = 'Saving...';
+    await db.save();
+    $('saveBtn').textContent = 'Saved!';
+    setTimeout(() => { $('saveBtn').textContent = 'Save to Disk'; }, 1500);
+  };
+  $('clearBtn').onclick = async () => {
+    if (!confirm('Delete all notes?')) return;
+    db.destroy();
+    // Create fresh store, overwriting the old one
+    db = await BrowserVec.create({
+      dimension: 384, metric: 'cosine', embedder,
+      persist: { name: STORE_NAME, autoLoad: false },
+    });
+    await db.save(); // overwrite with empty
+    $('stats').textContent = '0 notes';
+    renderNotes([], false);
+  };
+
+  let searchTimeout;
+  $('searchInput').oninput = () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => search($('searchInput').value), 200);
+  };
+
+  document.querySelectorAll('input[name="searchMode"]').forEach(el => {
+    el.onchange = () => search($('searchInput').value);
+  });
+
+  // Save on page unload
+  window.addEventListener('beforeunload', () => db.save());
+}
+
+init();
+</script>
+</body>
+</html>

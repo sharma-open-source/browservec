@@ -1,0 +1,990 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BrowserVec — M1 demo</title>
+    <style>
+      body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem; max-width: 760px; }
+      h1 { font-size: 1.2rem; }
+      button { font: inherit; padding: 0.5rem 1rem; cursor: pointer; }
+      pre { background: #111; color: #b9f; padding: 1rem; border-radius: 6px; overflow: auto; }
+      .ok { color: #5c5; } .bad { color: #f55; } .dim { color: #888; }
+    </style>
+  </head>
+  <body>
+    <h1>BrowserVec — M1 (flat GPU brute-force)</h1>
+    <p class="dim">
+      Generates a random corpus, runs a top-k query on the GPU, and checks the
+      result against a CPU brute-force reference. Requires a WebGPU browser.
+    </p>
+    <p>
+      <label>vectors <input id="n" type="number" value="100000" /></label>
+      <label>dim <input id="dim" type="number" value="768" /></label>
+      <button id="run">Run benchmark</button>
+      <button id="quant">Quantized vs fp32 (M3)</button>
+      <button id="ivf">IVF / ANN (M4)</button>
+      <button id="combo">IVF × int8 (M4 combo)</button>
+      <button id="text">Text retrieval (M5)</button>
+      <button id="worker">Worker ingest (NFR-8)</button>
+      <button id="chunk">Chunked corpus (NFR-10)</button>
+      <button id="gputopk">GPU top-k</button>
+      <button id="cpufallback">CPU fallback (M6)</button>
+      <button id="m6report">M6 device report</button>
+      <button id="persist">Test persistence (M2)</button>
+      <button id="encrypt">Encrypted persist (M6)</button>
+      <button id="delete">Delete + compaction</button>
+    </p>
+    <pre id="out">ready.</pre>
+
+    <script type="module">
+      import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+      const out = document.getElementById('out');
+      const log = (msg, cls = '') =>
+        (out.innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`);
+
+      function randVec(dim) {
+        const v = new Float32Array(dim);
+        for (let i = 0; i < dim; i++) v[i] = Math.random() * 2 - 1;
+        return v;
+      }
+
+      // CPU cosine reference (normalized dot) for correctness checking.
+      function cpuTopK(corpus, dim, q, k) {
+        const norm = (v) => {
+          let s = 0;
+          for (let i = 0; i < dim; i++) s += v[i] * v[i];
+          s = Math.sqrt(s) || 1;
+          const o = new Float32Array(dim);
+          for (let i = 0; i < dim; i++) o[i] = v[i] / s;
+          return o;
+        };
+        const qn = norm(q);
+        const scored = [];
+        for (let r = 0; r < corpus.length; r++) {
+          const cn = norm(corpus[r]);
+          let dot = 0;
+          for (let i = 0; i < dim; i++) dot += cn[i] * qn[i];
+          scored.push({ row: r, score: dot });
+        }
+        scored.sort((a, b) => b.score - a.score);
+        return scored.slice(0, k);
+      }
+
+      document.getElementById('run').onclick = async () => {
+        out.textContent = '';
+        const support = BrowserVec.isSupported();
+        log(`support: ${JSON.stringify(support)}`);
+        if (!support.webgpu) return log('WebGPU not available in this browser.', 'bad');
+
+        const n = +document.getElementById('n').value;
+        const dim = +document.getElementById('dim').value;
+        const k = 10;
+
+        log(`building corpus: ${n} × ${dim} ...`);
+        const corpus = Array.from({ length: n }, () => randVec(dim));
+        const q = randVec(dim);
+
+        const db = await BrowserVec.create({ dimension: dim, metric: 'cosine' });
+
+        let t = performance.now();
+        await db.addBatch(corpus.map((v, i) => ({ id: `v${i}`, vector: v })));
+        log(`ingest: ${(performance.now() - t).toFixed(1)} ms (${(n / ((performance.now() - t) / 1000) / 1000).toFixed(0)}k/s)`);
+
+        // warm up (first dispatch compiles/uploads), then measure.
+        await db.query(q, { k });
+        t = performance.now();
+        const hits = await db.query(q, { k });
+        const gpuMs = performance.now() - t;
+        log(`GPU query: <b>${gpuMs.toFixed(2)} ms</b> for top-${k} over ${n}`, 'ok');
+
+        t = performance.now();
+        const ref = cpuTopK(corpus, dim, q, k);
+        const cpuMs = performance.now() - t;
+        log(`CPU query: ${cpuMs.toFixed(1)} ms  (speedup ~${(cpuMs / gpuMs).toFixed(1)}×)`, 'dim');
+
+        const gpuIds = hits.map((h) => h.id);
+        const refIds = ref.map((r) => `v${r.row}`);
+        const overlap = gpuIds.filter((id) => refIds.includes(id)).length;
+        log(`recall@${k} vs CPU: ${overlap}/${k}`, overlap === k ? 'ok' : 'bad');
+        log(`top hit: ${gpuIds[0]} (gpu score ${hits[0].score.toFixed(4)}, cpu ${ref[0].score.toFixed(4)})`);
+
+        db.destroy();
+      };
+
+      // M3: compare int8 TurboQuant (with GPU kernel) against fp32 flat ground truth.
+      document.getElementById('quant').onclick = async () => {
+        out.textContent = '';
+        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+        const n = +document.getElementById('n').value;
+        const dim = +document.getElementById('dim').value;
+        const k = 10;
+        log(`corpus: ${n} × ${dim} (clustered, same as combo), fp32 vs int8 vs int4 vs 1-bit flat ...`);
+        const corpus = clusteredCorpus(n, dim, 200, 0.35);
+        const q = corpus[(Math.random() * n) | 0];
+        const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+
+        // fp32 ground truth
+        const f = await BrowserVec.create({ dimension: dim, metric: 'cosine' });
+        await f.addBatch(records);
+        await f.query(q, { k });
+        let t = performance.now();
+        const fHits = await f.query(q, { k });
+        const fMs = performance.now() - t;
+        const fIds = fHits.map((h) => h.id);
+        log(`fp32 flat:  ${fMs.toFixed(2)} ms   top: ${fIds.slice(0, 3).join(', ')}`, 'ok');
+        f.destroy();
+
+        // TurboQuant at int8, int4, and 1-bit binary — raw vs exact re-rank.
+        const pad = nextPow2(dim);
+        for (const bits of [8, 4, 1]) {
+          const qd = await BrowserVec.create({ dimension: dim, metric: 'cosine', quantBits: bits });
+          t = performance.now();
+          await qd.addBatch(records);
+          const buildMs = performance.now() - t;
+          await qd.query(q, { k });
+
+          t = performance.now();
+          const qHits = await qd.query(q, { k });
+          const qMs = performance.now() - t;
+          const recall = qHits.map((h) => h.id).filter((id) => fIds.includes(id)).length / k;
+          const rawHits = await qd.query(q, { k, rerank: false });
+          const rawRecall = rawHits.map((h) => h.id).filter((id) => fIds.includes(id)).length / k;
+
+          // bytes/row after the pad: int8 = pad, int4 = pad/2, 1-bit = pad/8.
+          const bytes = bits === 8 ? pad : bits === 4 ? pad / 2 : pad / 8;
+          const label = bits === 1 ? '1-bit ' : `int${bits} `;
+          const bar = bits === 1 ? 0.9 : 0.95; // binary is coarsest — honest bar
+          log(
+            `${label}: ${qMs.toFixed(2)} ms  recall@${k} raw=${rawRecall.toFixed(2)} +rerank=${recall.toFixed(2)}  ` +
+              `mem ${dim * 4}→${bytes} B (${(dim * 4 / bytes).toFixed(1)}× less)  build ${buildMs.toFixed(0)}ms`,
+            recall >= bar ? 'ok' : 'bad',
+          );
+          qd.destroy();
+        }
+        log(`(raw recall drops as bits shrink — int4, then 1-bit; exact re-rank recovers it — that's the design)`, 'dim');
+      };
+      function nextPow2(n) { let p = 4; while (p < n) p <<= 1; return p; }
+
+      // Clustered synthetic corpus — representative of real embeddings (which form
+      // topical clusters). Uniform-random vectors are an adversarial worst case for
+      // IVF, so a fair ANN benchmark needs cluster structure.
+      function clusteredCorpus(n, dim, nCenters, spread) {
+        const centers = Array.from({ length: nCenters }, () => randVec(dim));
+        const out = [];
+        for (let i = 0; i < n; i++) {
+          const c = centers[(Math.random() * nCenters) | 0];
+          const v = new Float32Array(dim);
+          for (let d = 0; d < dim; d++) v[d] = c[d] + (Math.random() * 2 - 1) * spread;
+          out.push(v);
+        }
+        return out;
+      }
+
+      // M6 device report — a portable capability probe + fixed-seed config matrix.
+      // Open the demo on each target browser/phone, tap this once, and paste the
+      // JSON block back. Every device grades on the SAME seeded corpus so recall
+      // and latency are directly comparable; the report also captures WebGPU
+      // adapter limits, OPFS/WASM-SIMD/Worker support, and the CPU-fallback path.
+      document.getElementById('m6report').onclick = async () => {
+        out.textContent = '';
+        log('Running M6 device report — ~10–40s depending on device. Keep this tab focused.\n', 'dim');
+
+        // Deterministic PRNG (mulberry32) → identical corpus on every device.
+        const mk = (seed) => { let a = seed >>> 0; return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; };
+        const seededCorpus = (n, dim, nc, spread, seed) => {
+          const rnd = mk(seed);
+          const rv = () => { const v = new Float32Array(dim); for (let d = 0; d < dim; d++) v[d] = rnd() * 2 - 1; return v; };
+          const centers = Array.from({ length: nc }, rv);
+          const arr = [];
+          for (let i = 0; i < n; i++) { const c = centers[(rnd() * nc) | 0]; const v = new Float32Array(dim); for (let d = 0; d < dim; d++) v[d] = c[d] + (rnd() * 2 - 1) * spread; arr.push(v); }
+          return arr;
+        };
+
+        const N = 20000, dim = 384, k = 10, Q = 30, SEED = 0x1234abcd;
+        const report = { schema: 'browservec-m6/1', ts: new Date().toISOString(), ua: navigator.userAgent, corpus: { n: N, dim, k, queries: Q, seed: SEED } };
+
+        // ---- capability probe ----
+        report.support = BrowserVec.isSupported();
+        report.worker = typeof Worker !== 'undefined';
+        try { report.wasmSimd = WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11])); } catch { report.wasmSimd = false; }
+        if (navigator.gpu) {
+          try {
+            const ad = await navigator.gpu.requestAdapter();
+            if (ad) {
+              const L = ad.limits;
+              report.gpu = {
+                maxStorageBufferBindingSize: L.maxStorageBufferBindingSize,
+                maxBufferSize: L.maxBufferSize,
+                maxComputeInvocationsPerWorkgroup: L.maxComputeInvocationsPerWorkgroup,
+                maxComputeWorkgroupSizeX: L.maxComputeWorkgroupSizeX,
+                maxComputeWorkgroupsPerDimension: L.maxComputeWorkgroupsPerDimension,
+              };
+              let info = ad.info;
+              if (!info && typeof ad.requestAdapterInfo === 'function') { try { info = await ad.requestAdapterInfo(); } catch {} }
+              if (info) report.adapter = { vendor: info.vendor || '', architecture: info.architecture || '', description: info.description || '' };
+            } else { report.gpu = null; }
+          } catch (e) { report.gpuError = String(e); }
+        }
+        log(`device: ${report.support.webgpu ? 'WebGPU ✓' : 'no WebGPU'}  |  OPFS ${report.support.opfs ? '✓' : '✗'}  |  WASM-SIMD ${report.wasmSimd ? '✓' : '✗'}  |  Worker ${report.worker ? '✓' : '✗'}`, report.support.webgpu ? 'ok' : 'bad');
+        if (report.adapter) log(`adapter: ${report.adapter.vendor} ${report.adapter.architecture} ${report.adapter.description}`.trim(), 'dim');
+
+        const pad = nextPow2(dim);
+        const bytesPerRow = (bits) => bits === 0 ? dim * 4 : bits === 8 ? pad : bits === 4 ? pad / 2 : pad / 8;
+
+        // Fixed corpus + query set (queries are seeded picks from the corpus).
+        const corpus = seededCorpus(N, dim, 200, 0.35, SEED);
+        const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+        const qrnd = mk(SEED ^ 0x9e3779b9);
+        const queries = Array.from({ length: Q }, () => corpus[(qrnd() * N) | 0]);
+
+        report.results = {};
+        if (report.support.webgpu) {
+          // Run one config: ingest + warm (buildMs), then Q timed queries + recall vs truth.
+          const runCfg = async (cfg, truth) => {
+            const db = await BrowserVec.create({ dimension: dim, metric: 'cosine', ...cfg });
+            let t = performance.now();
+            await db.addBatch(records);
+            await db.query(queries[0], { k }); // triggers lazy build / warms pipelines
+            const buildMs = performance.now() - t;
+            t = performance.now();
+            let hit = 0; const sets = [];
+            for (let i = 0; i < Q; i++) { const got = await db.query(queries[i], { k }); sets.push(new Set(got.map((h) => h.id))); if (truth) hit += got.filter((h) => truth[i].has(h.id)).length; }
+            const qMs = (performance.now() - t) / Q;
+            const st = db.stats();
+            db.destroy();
+            return { r: { buildMs: +buildMs.toFixed(0), qMs: +qMs.toFixed(3), recall: truth ? +(hit / (Q * k)).toFixed(3) : 1, bytesPerRow: bytesPerRow(st.quantBits), chunks: st.chunks || 1, nlist: st.nlist, ingest: st.ingest, train: st.train }, sets };
+          };
+
+          const matrix = [
+            ['fp32-flat', {}], ['int8-flat', { quantBits: 8 }], ['int4-flat', { quantBits: 4 }], ['bit1-flat', { quantBits: 1 }],
+            ['fp32-ivf', { ann: {} }], ['int8-ivf', { quantBits: 8, ann: {} }], ['int4-ivf', { quantBits: 4, ann: {} }], ['bit1-ivf', { quantBits: 1, ann: {} }],
+          ];
+          let truth = null;
+          for (const [key, cfg] of matrix) {
+            try {
+              const { r, sets } = await runCfg(cfg, truth);
+              if (key === 'fp32-flat') truth = sets; // ground truth for all recall
+              report.results[key] = r;
+              log(`  ${key.padEnd(10)} recall@${k}=${r.recall.toFixed(3)}  ${r.qMs.toFixed(2)} ms/q  build ${r.buildMs} ms  ${r.bytesPerRow} B/row${r.chunks > 1 ? `  chunks=${r.chunks}` : ''}`, r.recall >= 0.9 ? 'ok' : '');
+            } catch (e) { report.results[key] = { error: String(e) }; log(`  ${key}: ERROR ${e}`, 'bad'); }
+          }
+        } else {
+          log('WebGPU unavailable — capturing capability profile + CPU fallback only.', 'bad');
+        }
+
+        // CPU fallback (§NFR-7): force the WASM path and time it on a smaller slice.
+        try {
+          globalThis.__BROWSERVEC_FORCE_CPU__ = true;
+          const cN = Math.min(N, 8000), cQ = 5;
+          const c = await BrowserVec.create({ dimension: dim, metric: 'cosine', fallback: 'wasm' });
+          await c.addBatch(records.slice(0, cN));
+          await c.query(queries[0], { k });
+          let t = performance.now();
+          for (let i = 0; i < cQ; i++) await c.query(queries[i], { k });
+          report.cpu = { device: c.stats().device, n: cN, qMs: +((performance.now() - t) / cQ).toFixed(3) };
+          c.destroy();
+          log(`  cpu-fallback (${report.cpu.device}) n=${cN}: ${report.cpu.qMs.toFixed(2)} ms/q`, 'dim');
+        } catch (e) { report.cpu = { error: String(e) }; } finally { delete globalThis.__BROWSERVEC_FORCE_CPU__; }
+
+        // Persistence probe: which backend auto-selects (OPFS vs IndexedDB — varies
+        // by browser, e.g. iOS WebKit has no OPFS), and does a save→reload survive?
+        try {
+          const name = 'm6probe';
+          const p1 = await BrowserVec.create({ dimension: dim, metric: 'cosine', fallback: 'wasm', persist: { name } });
+          await p1.addBatch(records.slice(0, 500));
+          await p1.save();
+          const backend = p1.stats().persist || null;
+          p1.destroy();
+          const p2 = await BrowserVec.create({ dimension: dim, metric: 'cosine', fallback: 'wasm', persist: { name } });
+          report.persist = { backend, roundtrip: p2.count === 500 };
+          p2.destroy();
+          log(`  persist backend: ${backend || 'none'}  round-trip ${report.persist.roundtrip ? '✓' : '✗'}`, report.persist.roundtrip ? 'dim' : 'bad');
+        } catch (e) { report.persist = { error: String(e) }; log(`  persist: ${e}`, 'bad'); }
+
+        log('\n=== BEGIN BROWSERVEC M6 REPORT ===', 'ok');
+        log(JSON.stringify(report));
+        log('=== END BROWSERVEC M6 REPORT ===', 'ok');
+        log('\nSelect everything between the BEGIN/END lines and paste it back (one per device).', 'dim');
+      };
+
+      // M4: IVF approximate index vs fp32 flat ground truth, sweeping nprobe.
+      document.getElementById('ivf').onclick = async () => {
+        out.textContent = '';
+        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+        const n = +document.getElementById('n').value;
+        const dim = +document.getElementById('dim').value;
+        const k = 10;
+        const queries = 50;
+
+        log(`corpus: ${n} × ${dim} (clustered), comparing IVF vs fp32 flat ...`);
+        const corpus = clusteredCorpus(n, dim, 200, 0.35);
+        const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+        const qs = Array.from({ length: queries }, () => corpus[(Math.random() * n) | 0]);
+
+        // fp32 flat ground truth.
+        const f = await BrowserVec.create({ dimension: dim, metric: 'cosine' });
+        await f.addBatch(records);
+        await f.query(qs[0], { k });
+        let t = performance.now();
+        const truth = [];
+        for (const q of qs) truth.push(new Set((await f.query(q, { k })).map((h) => h.id)));
+        const flatMs = (performance.now() - t) / queries;
+        log(`fp32 flat:   ${flatMs.toFixed(2)} ms/query (exact ground truth)`, 'ok');
+        f.destroy();
+
+        // IVF index — one build, then sweep nprobe.
+        const db = await BrowserVec.create({ dimension: dim, metric: 'cosine', ann: {} });
+        t = performance.now();
+        await db.addBatch(records);
+        await db.query(qs[0], { k, nprobe: 1 }); // triggers lazy build (k-means + assign)
+        const buildMs = performance.now() - t;
+        const nlist = db.stats().nlist;
+        log(`IVF build:   ${buildMs.toFixed(0)} ms for ${n} (nlist=${nlist}, one-time)`, 'dim');
+
+        for (const nprobe of [1, 4, 8, 16, 32]) {
+          if (nprobe > nlist) break;
+          await db.query(qs[0], { k, nprobe }); // warm
+          t = performance.now();
+          let hit = 0;
+          for (let i = 0; i < queries; i++) {
+            const got = await db.query(qs[i], { k, nprobe });
+            hit += got.filter((h) => truth[i].has(h.id)).length;
+          }
+          const ms = (performance.now() - t) / queries;
+          const recall = hit / (queries * k);
+          const cls = recall >= 0.95 ? 'ok' : '';
+          log(
+            `nprobe=${String(nprobe).padStart(2)}  recall@${k}=${recall.toFixed(3)}  ` +
+              `${ms.toFixed(2)} ms/query  (${(flatMs / ms).toFixed(1)}× vs flat, scan ~${(nprobe / nlist * 100).toFixed(1)}%)`,
+            cls,
+          );
+        }
+        db.destroy();
+      };
+
+      // M4 combo: IVF × int8 — clusters + quantizes so 1M fits AND only nprobe lists
+      // are scanned. Compares against fp32 flat truth and reports memory + recall.
+      document.getElementById('combo').onclick = async () => {
+        out.textContent = '';
+        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+        const n = +document.getElementById('n').value;
+        const dim = +document.getElementById('dim').value;
+        const k = 10;
+        const queries = 50;
+
+        log(`corpus: ${n} × ${dim} (clustered), IVF×int8 & IVF×int4 & IVF×1-bit vs fp32 flat ...`);
+        const corpus = clusteredCorpus(n, dim, 200, 0.35);
+        const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+        const qs = Array.from({ length: queries }, () => corpus[(Math.random() * n) | 0]);
+
+        // fp32 flat ground truth.
+        const f = await BrowserVec.create({ dimension: dim, metric: 'cosine' });
+        await f.addBatch(records);
+        await f.query(qs[0], { k });
+        let t = performance.now();
+        const truth = [];
+        for (const q of qs) truth.push(new Set((await f.query(q, { k })).map((h) => h.id)));
+        const flatMs = (performance.now() - t) / queries;
+        log(`fp32 flat:    ${flatMs.toFixed(2)} ms/query (exact ground truth)`, 'ok');
+        f.destroy();
+
+        // IVF × int8, int4, and 1-bit binary combos.
+        const pad = nextPow2(dim);
+        for (const bits of [8, 4, 1]) {
+          // Coarser codes near-tie on clustered data — hand re-rank a wider pool.
+          const rerankFactor = bits === 8 ? 4 : bits === 4 ? 16 : 32;
+          const db = await BrowserVec.create({
+            dimension: dim, metric: 'cosine', quantBits: bits, ann: {},
+            quant: { rerankFactor },
+          });
+          t = performance.now();
+          await db.addBatch(records);
+          await db.query(qs[0], { k, nprobe: 1 }); // triggers lazy build
+          const buildMs = performance.now() - t;
+          const nlist = db.stats().nlist;
+          const bytes = bits === 8 ? pad : bits === 4 ? pad / 2 : pad / 8;
+          const codeLabel = bits === 1 ? '1-bit' : `int${bits}`;
+          const perGiB = Math.floor((1 << 30) / bytes / 1e6);
+          log(`\nIVF×${codeLabel} (rerankFactor=${rerankFactor}): build ${buildMs.toFixed(0)} ms (nlist=${nlist}), ` +
+            `mem ${dim * 4}→${bytes} B (${(dim * 4 / bytes).toFixed(1)}× less) → ~${perGiB}M/GiB`, 'dim');
+
+          for (const nprobe of [4, 8, 16]) {
+            if (nprobe > nlist) break;
+            await db.query(qs[0], { k, nprobe }); // warm
+            t = performance.now();
+            let hit = 0;
+            for (let i = 0; i < queries; i++) {
+              const got = await db.query(qs[i], { k, nprobe });
+              hit += got.filter((h) => truth[i].has(h.id)).length;
+            }
+            const ms = (performance.now() - t) / queries;
+            const recall = hit / (queries * k);
+            log(
+              `  nprobe=${String(nprobe).padStart(2)}  recall@${k}=${recall.toFixed(3)}  ` +
+                `${ms.toFixed(2)} ms/query  (${(flatMs / ms).toFixed(1)}× vs flat)`,
+              recall >= 0.95 ? 'ok' : '',
+            );
+          }
+          // Diagnostic: nprobe=nlist scans every cluster → IVF degenerates to flat
+          // quant. If recall jumps here, the loss is in assignment, not the scan.
+          let dh = 0;
+          for (let i = 0; i < queries; i++) {
+            const got = await db.query(qs[i], { k, nprobe: nlist });
+            dh += got.filter((h) => truth[i].has(h.id)).length;
+          }
+          log(`  nprobe=${nlist} (full scan, diagnostic): recall@${k}=${(dh / (queries * k)).toFixed(3)}`, 'dim');
+          db.destroy();
+        }
+      };
+
+      // M5: end-to-end text retrieval, fully offline (zero-dep hashing embedder).
+      document.getElementById('text').onclick = async () => {
+        out.textContent = '';
+        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+        const embedder = hashingEmbedder({ dimension: 384 });
+        const db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder });
+
+        const docs = [
+          ['d1', 'WebGPU compute shaders run massively parallel kernels on the GPU'],
+          ['d2', 'Cosine similarity measures the angle between two vectors'],
+          ['d3', 'Sourdough bread needs a long fermentation of the dough'],
+          ['d4', 'Quantization stores vectors as int8 to save memory bandwidth'],
+          ['d5', 'The cat slept on the warm windowsill all afternoon'],
+          ['d6', 'IVF clustering scans only the nearest cells to speed up search'],
+        ];
+        await db.addTexts(docs.map(([id, text]) => ({ id, text, metadata: { text } })));
+        log(`indexed ${db.count} docs via on-device embedder (dim ${embedder.dimension})`, 'ok');
+
+        for (const q of ['gpu parallel kernels', 'saving memory with int8', 'baking bread dough']) {
+          const hits = await db.queryText(q, { k: 2 });
+          log(`\nquery: "${q}"`);
+          for (const h of hits) log(`  ${h.score.toFixed(3)}  ${h.metadata.text}`, 'dim');
+        }
+        log(`\nnote: hashingEmbedder is lexical (keyword), not semantic.`, 'dim');
+        log(`swap transformersEmbedder() for meaning — same store/query code.`, 'dim');
+        db.destroy();
+      };
+
+      // NFR-8: the CPU-heavy rotate+quantize of a quantized ingest runs in a Web
+      // Worker, so the main thread stays responsive. We ingest in chunks while a
+      // requestAnimationFrame heartbeat records inter-frame gaps — a blocked main
+      // thread shows up as long stalls between frames. Smooth frames (~16 ms) =
+      // the UI would stay interactive during ingest.
+      document.getElementById('worker').onclick = async () => {
+        out.textContent = '';
+        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+        const n = +document.getElementById('n').value;
+        const dim = +document.getElementById('dim').value;
+        const chunk = 4000;
+
+        log(`corpus: ${n} × ${dim}, int8 ingest in ${chunk}-row chunks ...`);
+        const corpus = clusteredCorpus(n, dim, 200, 0.35);
+        const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+
+        const db = await BrowserVec.create({ dimension: dim, metric: 'cosine', quantBits: 8 });
+
+        // Heartbeat: record a timestamp every animation frame during ingest.
+        let running = true;
+        const frames = [];
+        let raf = 0;
+        const beat = (t) => {
+          frames.push(t);
+          if (running) raf = requestAnimationFrame(beat);
+        };
+        raf = requestAnimationFrame(beat);
+
+        const t = performance.now();
+        for (let i = 0; i < records.length; i += chunk) {
+          await db.addBatch(records.slice(i, i + chunk));
+        }
+        const ingestMs = performance.now() - t;
+        running = false;
+        cancelAnimationFrame(raf);
+
+        // Inter-frame gaps → worst main-thread stall.
+        let maxGap = 0;
+        for (let i = 1; i < frames.length; i++) maxGap = Math.max(maxGap, frames[i] - frames[i - 1]);
+        const avgFps = frames.length > 1 ? 1000 / ((frames.at(-1) - frames[0]) / (frames.length - 1)) : 0;
+
+        const mode = db.stats().ingest;
+        // Responsive = the ingest sustained an interactive frame rate. 30 fps
+        // average is the bar; a rare buffer-realloc/GC blip can spike one frame.
+        const responsive = avgFps >= 30;
+        log(`ingest path: ${mode === 'worker' ? 'Web Worker (off main thread)' : 'main thread (no Worker)'}`,
+            mode === 'worker' ? 'ok' : 'dim');
+        log(`ingested ${db.count} rows in ${ingestMs.toFixed(0)} ms`);
+        log(`main-thread heartbeat: ${frames.length} frames, ~${avgFps.toFixed(0)} fps avg, worst stall ${maxGap.toFixed(0)} ms`,
+            responsive ? 'ok' : 'bad');
+        log(responsive
+          ? `→ main thread stayed interactive during ingest (~${avgFps.toFixed(0)} fps) ✅`
+          : `→ main thread was blocked during ingest (~${avgFps.toFixed(0)} fps) — check Worker support`,
+          responsive ? 'ok' : 'bad');
+        log(`(rotate+quantize ran ${mode === 'worker' ? 'in the Worker' : 'in-thread'}; without offload this ` +
+            `blocks the main thread for the whole ingest)`, 'dim');
+
+        // Sanity: the store still answers queries correctly.
+        const hits = await db.query(corpus[0], { k: 3 });
+        log(`\nsanity query top-1: ${hits[0].id} (score ${hits[0].score.toFixed(3)})`, 'dim');
+        db.destroy();
+
+        // NFR-8 (part 2): the IVF k-means mean-update also runs off the main
+        // thread. Build an IVF index (triggered lazily by the first query) while a
+        // heartbeat runs, and check the main thread stayed interactive. The GPU
+        // does the assignment; the Worker does the per-iteration centroid means.
+        log(`\nIVF k-means build offload — fp32 IVF over ${n} × ${dim} ...`);
+        const idb = await BrowserVec.create({ dimension: dim, metric: 'cosine', ann: {} });
+        await idb.addBatch(records);
+
+        let brun = true;
+        const bframes = [];
+        let braf = 0;
+        const bbeat = (t) => { bframes.push(t); if (brun) braf = requestAnimationFrame(bbeat); };
+        braf = requestAnimationFrame(bbeat);
+
+        const bt = performance.now();
+        await idb.query(corpus[0], { k: 10 }); // first query builds the index
+        const buildMs = performance.now() - bt;
+        brun = false;
+        cancelAnimationFrame(braf);
+
+        let bMaxGap = 0;
+        for (let i = 1; i < bframes.length; i++) bMaxGap = Math.max(bMaxGap, bframes[i] - bframes[i - 1]);
+        const bFps = bframes.length > 1 ? 1000 / ((bframes.at(-1) - bframes[0]) / (bframes.length - 1)) : 0;
+
+        const tmode = idb.stats().train;
+        const bResponsive = bFps >= 30;
+        log(`train path: ${tmode === 'worker' ? 'Web Worker (off main thread)' : 'main thread (no Worker)'}`,
+            tmode === 'worker' ? 'ok' : 'dim');
+        log(`IVF build (k-means + assign + lists): ${buildMs.toFixed(0)} ms, nlist=${idb.stats().nlist}`);
+        log(`main-thread heartbeat: ${bframes.length} frames, ~${bFps.toFixed(0)} fps avg, worst stall ${bMaxGap.toFixed(0)} ms`,
+            bResponsive ? 'ok' : 'bad');
+        log(bResponsive
+          ? `→ main thread stayed interactive during the build (~${bFps.toFixed(0)} fps) ✅`
+          : `→ main thread was blocked during the build (~${bFps.toFixed(0)} fps) — check Worker support`,
+          bResponsive ? 'ok' : 'bad');
+        log(`(centroid mean-update ran ${tmode === 'worker' ? 'in the Worker' : 'in-thread'}; ` +
+            `results are byte-identical either way)`, 'dim');
+        idb.destroy();
+      };
+
+      // NFR-10: a single GPU storage buffer is capped (128 MiB on many devices),
+      // so a large corpus is split across chunks scanned in sequence. Here we
+      // force a small chunk size to trigger chunking cheaply, then prove the
+      // chunked flat store returns *exactly* the same top-k as a single-buffer
+      // store (flat is exact, so results must be identical, not just close).
+      document.getElementById('chunk').onclick = async () => {
+        out.textContent = '';
+        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+        const n = +document.getElementById('n').value;
+        const dim = +document.getElementById('dim').value;
+        const k = 10;
+        const queries = 30;
+        const chunkRows = 25000; // force multiple chunks; real trigger is the device buffer limit
+
+        log(`corpus: ${n} × ${dim}, forcing chunks of ${chunkRows} rows (fp32 + int8, flat + IVF) ...`);
+        const corpus = clusteredCorpus(n, dim, 200, 0.35);
+        const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+        const qs = Array.from({ length: queries }, () => corpus[(Math.random() * n) | 0]);
+
+        // A chunked store must return EXACTLY the same top-k as a single-buffer
+        // store of the same config: fp32 is exact; int8 shares the rotation seed
+        // so codes+scores match bit-for-bit; IVF k-means is deterministically
+        // seeded, so the clustering (and thus results) is identical either way —
+        // chunking only changes which buffer a row's codes live in.
+        const configs = [
+          { label: 'fp32', quantBits: 0 },
+          { label: 'int8', quantBits: 8 },
+          { label: 'fp32×IVF', quantBits: 0, ann: {} },
+          { label: 'int8×IVF', quantBits: 8, ann: {} },
+        ];
+        for (const cfg of configs) {
+          const base = { dimension: dim, metric: 'cosine', quantBits: cfg.quantBits };
+          if (cfg.ann) base.ann = cfg.ann;
+
+          const ref = await BrowserVec.create(base);
+          await ref.addBatch(records);
+          await ref.query(qs[0], { k });
+          const truth = [];
+          for (const q of qs) truth.push((await ref.query(q, { k })).map((h) => h.id).join(','));
+          ref.destroy();
+
+          const db = await BrowserVec.create({ ...base, chunkRows });
+          let t = performance.now();
+          await db.addBatch(records);
+          const ingestMs = performance.now() - t;
+          const st = db.stats();
+          const bytesPerRow = cfg.quantBits === 0 ? dim * 4 : (nextPow2(dim) / (cfg.quantBits === 8 ? 4 : 8)) * 4;
+
+          await db.query(qs[0], { k });
+          t = performance.now();
+          let identical = 0;
+          for (let i = 0; i < qs.length; i++) {
+            const ids = (await db.query(qs[i], { k })).map((h) => h.id).join(',');
+            if (ids === truth[i]) identical++;
+          }
+          const qMs = (performance.now() - t) / qs.length;
+          const okChunks = st.chunks > 1;
+          const okMatch = identical === qs.length;
+          log(`\n[${cfg.label}] spans ${st.chunks} buffers (~${((chunkRows * bytesPerRow) / 2 ** 20).toFixed(0)} MiB each), ` +
+              `ingest ${ingestMs.toFixed(0)} ms, ${qMs.toFixed(2)} ms/query`, okChunks ? 'ok' : 'bad');
+          log(`[${cfg.label}] top-${k} identical to single-buffer reference on ${identical}/${qs.length} queries ` +
+              (okMatch ? '✅' : '❌'), okMatch ? 'ok' : 'bad');
+          db.destroy();
+        }
+        log(`\n→ chunked scan is exact — a corpus can now exceed one GPU buffer.`, 'ok');
+      };
+
+      // GPU top-k: past a few thousand rows the flat index reduces on the GPU
+      // instead of copying back all N scores and sorting on the CPU. It's exact,
+      // so its top-k must match a brute-force CPU reference bit-for-bit (by score;
+      // equal-score ties may reorder). We also A/B the latency below vs above the
+      // switch-over threshold to show the readback that was eliminated.
+      document.getElementById('gputopk').onclick = async () => {
+        out.textContent = '';
+        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+        const dim = +document.getElementById('dim').value;
+        const k = 10;
+        const queries = 30;
+
+        // Sizes straddling the 4096-row GPU switch-over: 2000 stays on the CPU
+        // full-readback path, the rest reduce on the GPU. All must match truth.
+        const sizes = [2000, 50000, +document.getElementById('n').value];
+        log(`GPU top-k vs CPU brute-force ground truth (dim ${dim}, k ${k}, ${queries} queries/size)`);
+
+        for (const n of sizes) {
+          const corpus = clusteredCorpus(n, dim, 200, 0.35);
+          const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+          const qs = Array.from({ length: queries }, () => corpus[(Math.random() * n) | 0]);
+
+          const db = await BrowserVec.create({ dimension: dim, metric: 'cosine' });
+          let t = performance.now();
+          await db.addBatch(records);
+          const ingestMs = performance.now() - t;
+
+          // Correctness: compare to a brute-force CPU reference. ids must match in
+          // order (scores are distinct on clustered float data); scores match to a
+          // small epsilon since the GPU reduces in f32 and JS references in f64.
+          let idMatch = 0, scoreMatch = 0;
+          for (const q of qs) {
+            const got = await db.query(q, { k });
+            const truth = cpuTopK(corpus, dim, q, k);
+            const gid = got.map((h) => h.id).join(',');
+            const wid = truth.map((h) => `v${h.row}`).join(',');
+            if (gid === wid) idMatch++;
+            const sameScore = got.length === truth.length &&
+              got.every((h, i) => Math.abs(h.score - truth[i].score) < 1e-3);
+            if (sameScore) scoreMatch++;
+          }
+
+          // Latency: time db.query ALONE — the CPU reference above must not be in
+          // the timed loop (its per-query full-corpus normalize dwarfs the GPU).
+          await db.query(qs[0], { k }); // warm up
+          t = performance.now();
+          for (const q of qs) await db.query(q, { k });
+          const qMs = (performance.now() - t) / qs.length;
+
+          const path = n >= 4096 ? 'GPU reduction' : 'CPU readback';
+          const ok = idMatch === queries;
+          log(`\n[${n}] ${path}: ingest ${ingestMs.toFixed(0)} ms, ${qMs.toFixed(2)} ms/query`);
+          log(`[${n}] top-${k} neighbors match truth on ${idMatch}/${queries}` +
+              ` (scores within 1e-3 on ${scoreMatch}/${queries}) ` + (ok ? '✅' : '❌'), ok ? 'ok' : 'bad');
+          db.destroy();
+        }
+
+        // Quantized int8 path: same GPU top-k reduction now runs on the quantized
+        // score buffer (over-fetch k·4 for re-rank still fits under the readback
+        // budget, so the reduction engages). int8 is approximate, so we check
+        // recall@k vs the fp32 brute-force truth stays high — proving the on-GPU
+        // selection picks the right candidates before the exact re-rank.
+        {
+          const n = Math.max(50000, +document.getElementById('n').value);
+          const corpus = clusteredCorpus(n, dim, 200, 0.35);
+          const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+          const qs = Array.from({ length: queries }, () => corpus[(Math.random() * n) | 0]);
+          const db = await BrowserVec.create({ dimension: dim, metric: 'cosine', quantBits: 8 });
+          await db.addBatch(records);
+          let hit = 0, total = 0;
+          for (const q of qs) {
+            const got = new Set((await db.query(q, { k })).map((h) => h.id));
+            const truth = cpuTopK(corpus, dim, q, k).map((h) => `v${h.row}`);
+            for (const id of truth) if (got.has(id)) hit++;
+            total += truth.length;
+          }
+          await db.query(qs[0], { k });
+          const t = performance.now();
+          for (const q of qs) await db.query(q, { k });
+          const qMs = (performance.now() - t) / qs.length;
+          const recall = (hit / total) * 100;
+          const ok = recall >= 90;
+          log(`\n[int8 N=${n}] GPU top-k on quantized scores: ${qMs.toFixed(2)} ms/query`);
+          log(`[int8 N=${n}] recall@${k} vs fp32 truth ${recall.toFixed(1)}% ` + (ok ? '✅' : '❌'),
+              ok ? 'ok' : 'bad');
+          db.destroy();
+        }
+
+        // IVF + IVF×int8 paths. Forcing a large nprobe makes every cluster a
+        // candidate (so the GPU top-k reduction definitely engages, candidates > 4096)
+        // and turns IVF fp32 into an exact scan — its ids must then match the brute-
+        // force truth exactly, proving the on-GPU reduction + slot→row remap is right.
+        {
+          const n = Math.max(50000, +document.getElementById('n').value);
+          const corpus = clusteredCorpus(n, dim, 200, 0.35);
+          const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+          const qs = Array.from({ length: queries }, () => corpus[(Math.random() * n) | 0]);
+          const bigProbe = 1e6; // clamped to nlist → scan all clusters
+
+          for (const cfg of [{ label: 'IVF fp32' }, { label: 'IVF×int8', quantBits: 8 }]) {
+            const base = { dimension: dim, metric: 'cosine', ann: {} };
+            if (cfg.quantBits) base.quantBits = cfg.quantBits;
+            const db = await BrowserVec.create(base);
+            await db.addBatch(records);
+            let hit = 0, total = 0, exactIds = 0;
+            for (const q of qs) {
+              const gotHits = await db.query(q, { k, nprobe: bigProbe });
+              const got = new Set(gotHits.map((h) => h.id));
+              const truth = cpuTopK(corpus, dim, q, k).map((h) => `v${h.row}`);
+              for (const id of truth) if (got.has(id)) hit++;
+              total += truth.length;
+              if (gotHits.map((h) => h.id).join(',') === truth.join(',')) exactIds++;
+            }
+            await db.query(qs[0], { k, nprobe: bigProbe });
+            const t = performance.now();
+            for (const q of qs) await db.query(q, { k, nprobe: bigProbe });
+            const qMs = (performance.now() - t) / qs.length;
+            const recall = (hit / total) * 100;
+            // fp32 with all clusters scanned is exact → require exact id match.
+            const ok = cfg.quantBits ? recall >= 90 : exactIds === queries;
+            log(`\n[${cfg.label} N=${n}] GPU top-k on candidates: ${qMs.toFixed(2)} ms/query`);
+            log(`[${cfg.label} N=${n}] ` +
+                (cfg.quantBits ? `recall@${k} ${recall.toFixed(1)}%` : `exact ids ${exactIds}/${queries}`) +
+                ' ' + (ok ? '✅' : '❌'), ok ? 'ok' : 'bad');
+            db.destroy();
+          }
+        }
+
+        log(`\n→ GPU top-k returns the same neighbors while reading back only` +
+            ` ceil(N/256)·k pairs instead of all N scores — now on the quantized and IVF paths too.`, 'ok');
+      };
+
+      // M6 / NFR-7: on browsers without WebGPU the library falls back to an exact
+      // CPU scan with IDENTICAL results (just slower). This browser has WebGPU, so
+      // we flip the internal force-CPU seam to exercise the fallback, then prove it
+      // returns the same top-k as the real GPU path on the same data.
+      document.getElementById('cpufallback').onclick = async () => {
+        out.textContent = '';
+        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+        const dim = +document.getElementById('dim').value;
+        const n = Math.min(20000, +document.getElementById('n').value);
+        const k = 10, queries = 30;
+        const corpus = clusteredCorpus(n, dim, 200, 0.35);
+        const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+        const qs = Array.from({ length: queries }, () => corpus[(Math.random() * n) | 0]);
+
+        log(`CPU fallback vs GPU on identical data (${n} × ${dim}, k ${k}, ${queries} queries)`);
+
+        // GPU reference.
+        const gpu = await BrowserVec.create({ dimension: dim, metric: 'cosine' });
+        await gpu.addBatch(records);
+        let t = performance.now();
+        const truth = [];
+        for (const q of qs) truth.push((await gpu.query(q, { k })).map((h) => h.id).join(','));
+        const gpuMs = (performance.now() - t) / qs.length;
+        log(`[GPU] device=${gpu.stats().device}, ${gpuMs.toFixed(2)} ms/query`);
+        gpu.destroy();
+
+        // Force the CPU path (test seam — never set in production code).
+        globalThis.__BROWSERVEC_FORCE_CPU__ = true;
+        try {
+          const cpu = await BrowserVec.create({ dimension: dim, metric: 'cosine', fallback: 'wasm' });
+          await cpu.addBatch(records);
+          t = performance.now();
+          let identical = 0;
+          for (let i = 0; i < qs.length; i++) {
+            const ids = (await cpu.query(qs[i], { k })).map((h) => h.id).join(',');
+            if (ids === truth[i]) identical++;
+          }
+          const cpuMs = (performance.now() - t) / qs.length;
+          const okDevice = cpu.stats().device === 'wasm';
+          const okMatch = identical === queries;
+          log(`[CPU] device=${cpu.stats().device}, ${cpuMs.toFixed(2)} ms/query`, okDevice ? 'ok' : 'bad');
+          log(`[CPU] top-${k} identical to GPU on ${identical}/${queries} queries ` +
+              (okMatch ? '✅' : '❌'), okMatch ? 'ok' : 'bad');
+          log(`\n→ no WebGPU? exact search still works — same neighbors, ~${(cpuMs / gpuMs).toFixed(0)}× slower here.`,
+              okMatch && okDevice ? 'ok' : 'bad');
+          cpu.destroy();
+        } finally {
+          delete globalThis.__BROWSERVEC_FORCE_CPU__;
+        }
+      };
+
+      // M2: save to OPFS/IndexedDB, drop the instance, reload, confirm it survives.
+      document.getElementById('persist').onclick = async () => {
+        out.textContent = '';
+        const support = BrowserVec.isSupported();
+        log(`support: ${JSON.stringify(support)}`);
+        if (!support.webgpu) return log('WebGPU not available.', 'bad');
+
+        const dim = 64;
+        const name = 'demo-session';
+        const records = Array.from({ length: 2000 }, (_, i) => ({
+          id: `doc-${i}`,
+          vector: randVec(dim),
+          metadata: { lang: i % 2 ? 'en' : 'fr' },
+        }));
+        const probe = records[7].vector;
+
+        // 1) create + ingest + save
+        let db = await BrowserVec.create({ dimension: dim, persist: { name } });
+        await db.addBatch(records);
+        let t = performance.now();
+        await db.save();
+        log(`saved ${db.count} vectors via ${db.stats().persist} in ${(performance.now() - t).toFixed(1)} ms`, 'ok');
+        const before = (await db.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+        db.destroy();
+
+        // 2) fresh instance, same name → auto-loads from storage (cold start)
+        t = performance.now();
+        const db2 = await BrowserVec.create({ dimension: dim, persist: { name } });
+        const loadMs = performance.now() - t;
+        log(`cold-start reload: ${db2.count} vectors in ${loadMs.toFixed(1)} ms`, db2.count === records.length ? 'ok' : 'bad');
+
+        const after = (await db2.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+        log(`query before save: [${before}]`, 'dim');
+        log(`query after reload: [${after}]`, before === after ? 'ok' : 'bad');
+        log(after === before ? 'persistence round-trip OK ✅' : 'MISMATCH ❌', after === before ? 'ok' : 'bad');
+
+        // 3) export/import round-trip
+        const blob = await db2.export();
+        log(`export blob: ${(blob.size / 1024).toFixed(1)} KiB`, 'dim');
+        const db3 = await BrowserVec.import(blob);
+        const imported = (await db3.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+        log(`import round-trip: [${imported}]`, imported === before ? 'ok' : 'bad');
+
+        db2.destroy();
+        db3.destroy();
+      };
+
+      // M6: persisted snapshots + exported blobs encrypted at rest with a passphrase
+      // (AES-256-GCM, PBKDF2 key). Auto-load decrypts; a wrong passphrase or tamper
+      // fails loudly. Data never leaves the device — and now it's safe at rest too.
+      document.getElementById('encrypt').onclick = async () => {
+        out.textContent = '';
+        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+        if (!globalThis.crypto?.subtle) return log('WebCrypto (crypto.subtle) unavailable.', 'bad');
+
+        const dim = 64;
+        const name = 'enc-demo';
+        const pass = 'correct horse battery staple';
+        const records = Array.from({ length: 1500 }, (_, i) => ({
+          id: `doc-${i}`, vector: randVec(dim), metadata: { lang: i % 2 ? 'en' : 'fr' },
+        }));
+        const probe = records[42].vector;
+
+        // 1) create + ingest + save (encrypted at rest).
+        let db = await BrowserVec.create({ dimension: dim, persist: { name, encryption: { passphrase: pass } } });
+        await db.addBatch(records);
+        await db.save();
+        const before = (await db.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+        log(`saved ${db.count} vectors encrypted via ${db.stats().persist}`, 'ok');
+        db.destroy();
+
+        // 2) reload with the correct passphrase → auto-decrypts.
+        db = await BrowserVec.create({ dimension: dim, persist: { name, encryption: { passphrase: pass } } });
+        const after = (await db.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+        log(`reload w/ correct passphrase: [${after}]`, after === before ? 'ok' : 'bad');
+        log(after === before ? 'decrypt round-trip OK ✅' : 'MISMATCH ❌', after === before ? 'ok' : 'bad');
+        db.destroy();
+
+        // 3) reload with the WRONG passphrase → must fail (GCM auth).
+        let rejected = false;
+        try {
+          const bad = await BrowserVec.create({ dimension: dim, persist: { name, encryption: { passphrase: 'nope' } } });
+          bad.destroy();
+        } catch (e) {
+          rejected = true;
+          log(`wrong passphrase rejected: ${e.message}`, 'ok');
+        }
+        if (!rejected) log('SECURITY BUG: wrong passphrase was accepted ❌', 'bad');
+
+        // 4) reload with NO passphrase → must fail (it's encrypted).
+        let needsPass = false;
+        try {
+          const plain = await BrowserVec.create({ dimension: dim, persist: { name } });
+          plain.destroy();
+        } catch (e) {
+          needsPass = true;
+          log(`encrypted blob without passphrase rejected: ${e.message}`, 'ok');
+        }
+        if (!needsPass) log('BUG: encrypted blob loaded without a passphrase ❌', 'bad');
+
+        // 5) encrypted export/import round-trip.
+        const db2 = await BrowserVec.create({ dimension: dim, persist: { name, encryption: { passphrase: pass } } });
+        const blob = await db2.export({ encryption: { passphrase: pass } });
+        const db3 = await BrowserVec.import(blob, { encryption: { passphrase: pass } });
+        const imported = (await db3.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+        log(`\nencrypted export→import round-trip: [${imported}]`, imported === before ? 'ok' : 'bad');
+        db2.destroy();
+        db3.destroy();
+      };
+
+      // Deletion: rows are tombstoned (filtered from results immediately, cheap) and
+      // physically compacted out on save → reload. Verifies deleted ids vanish from
+      // results, that queries still return a full k (over-fetch past tombstones), and
+      // that a reload drops them for good. Runs on fp32 and int8×IVF.
+      document.getElementById('delete').onclick = async () => {
+        out.textContent = '';
+        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+        const dim = 128;
+        const n = 5000;
+        const k = 10;
+        for (const cfg of [{ label: 'fp32' }, { label: 'int8×IVF', quantBits: 8, ann: {} }]) {
+          const corpus = clusteredCorpus(n, dim, 40, 0.35);
+          const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+          const base = { dimension: dim, metric: 'cosine' };
+          if (cfg.quantBits) base.quantBits = cfg.quantBits;
+          if (cfg.ann) base.ann = cfg.ann;
+
+          const db = await BrowserVec.create(base);
+          await db.addBatch(records);
+
+          // Pick a query, grab its top-k, delete the current top-1, requery.
+          const q = corpus[123];
+          const first = await db.query(q, { k });
+          const top1 = first[0].id;
+          const removed = db.delete(top1);
+          const second = await db.query(q, { k });
+          const stillThere = second.some((h) => h.id === top1);
+
+          log(`\n[${cfg.label}] n=${n} → query top-1 was ${top1}`);
+          log(`[${cfg.label}] delete(${top1}) → ${removed}, count ${n}→${db.count}, tombstones ${db.stats().deleted}`,
+              removed && db.count === n - 1 ? 'ok' : 'bad');
+          log(`[${cfg.label}] requery: top-1 now ${second[0].id}, deleted id present: ${stillThere}, results returned: ${second.length}`,
+              !stillThere && second.length === k ? 'ok' : 'bad');
+
+          // Delete a batch, then export→import (compaction) and confirm they're gone.
+          for (let i = 0; i < 100; i++) db.delete(`v${i}`);
+          const beforeCount = db.count;
+          const blob = await db.export();
+          const reloaded = await BrowserVec.import(blob, cfg.quantBits ? { quantBits: cfg.quantBits, ann: cfg.ann } : {});
+          const gone = reloaded.get('v0') === null && reloaded.get(top1) === null;
+          log(`[${cfg.label}] deleted 100 more → count ${beforeCount}, export/reload count ${reloaded.count}, tombstones after reload ${reloaded.stats().deleted ?? 0}`,
+              reloaded.count === beforeCount && !reloaded.stats().deleted ? 'ok' : 'bad');
+          log(`[${cfg.label}] compacted: deleted ids absent after reload: ${gone} ✅`, gone ? 'ok' : 'bad');
+          db.destroy();
+          reloaded.destroy();
+        }
+      };
+    </script>
+  </body>
+</html>

@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — Performance Benchmark</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem auto; max-width: 960px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  .subtitle { color: #666; margin-top: 0; font-size: .9rem; }
+  .controls { display: flex; gap: .75rem; margin: 1rem 0; flex-wrap: wrap; align-items: end; }
+  .controls label { font-size: .85rem; display: flex; flex-direction: column; gap: .2rem; }
+  .controls input, .controls select { padding: .4rem; border: 1px solid #ddd; border-radius: 4px; font: inherit; font-size: .85rem; }
+  .controls button { padding: .5rem 1rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font: inherit; font-weight: 600; }
+  .controls button:disabled { opacity: .5; cursor: not-allowed; }
+  .controls button.danger { background: #d32f2f; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .5rem; margin: 1rem 0; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: .6rem; text-align: center; }
+  .card .val { font-size: 1.4rem; font-weight: 700; color: #1a73e8; }
+  .card .val.good { color: #2e7d32; }
+  .card .val.warn { color: #e65100; }
+  .card .label { font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; color: #888; margin-top: .15rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .8rem; margin: .5rem 0; }
+  th, td { padding: .4rem .5rem; text-align: right; border-bottom: 1px solid #eee; }
+  th { text-align: right; background: #fafafa; font-weight: 600; color: #555; }
+  td:first-child, th:first-child { text-align: left; }
+  .hl { background: #fffde7; }
+  .ok { color: #2e7d32; }
+  .warn { color: #e65100; }
+  .bar { display: inline-block; height: 14px; border-radius: 3px; margin-right: 4px; vertical-align: middle; }
+  .chart { margin: 1rem 0; padding: .5rem; border: 1px solid #eee; border-radius: 8px; min-height: 60px; }
+  .chart .row { display: flex; align-items: center; margin: 2px 0; font-size: .75rem; }
+  .chart .row .lbl { width: 120px; text-align: right; padding-right: .5rem; color: #555; }
+  .chart .row .bar-wrap { flex: 1; }
+  pre { background: #111; color: #b9f; padding: .75rem; border-radius: 6px; overflow: auto; font-size: .8rem; max-height: 300px; }
+  .log-area { margin-top: 1rem; }
+  .log-area summary { cursor: pointer; font-weight: 600; color: #555; font-size: .85rem; }
+  .bad { color: #d32f2f; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+  .config-note { font-size: .8rem; color: #888; margin-top: .5rem; }
+</style>
+</head>
+<body>
+<h1>Performance Benchmark</h1>
+<p class="subtitle">Measure ingest throughput, query latency, and recall across corpus sizes and index types. Generates synthetic text documents locally — no network.</p>
+
+<div class="controls">
+  <label>Documents
+    <select id="docCount">
+      <option value="500">500</option>
+      <option value="1000">1,000</option>
+      <option value="5000">5,000</option>
+      <option value="10000">10,000</option>
+      <option value="50000" selected>50,000</option>
+      <option value="100000">100,000</option>
+    </select>
+  </label>
+  <label>Dimensions
+    <select id="dimension">
+      <option value="64">64 (fast)</option>
+      <option value="128">128</option>
+      <option value="384" selected>384 (text)</option>
+      <option value="768">768 (default)</option>
+    </select>
+  </label>
+  <label>Index type
+    <select id="indexType">
+      <option value="flat">Flat (fp32)</option>
+      <option value="int8">Quantized int8</option>
+      <option value="int4">Quantized int4</option>
+      <option value="ivf">IVF</option>
+      <option value="ivf-int8">IVF × int8</option>
+      <option value="ivf-int4">IVF × int4</option>
+    </select>
+  </label>
+  <button id="runBtn">Run Benchmark</button>
+  <button id="compareBtn" class="danger">Run All Indexes</button>
+</div>
+<div class="config-note" id="configNote"></div>
+
+<div class="summary" id="summary">
+  <div class="card"><div class="val" id="sCorpus">—</div><div class="label">Corpus size</div></div>
+  <div class="card"><div class="val" id="sIngest">—</div><div class="label">Ingest rate</div></div>
+  <div class="card"><div class="val" id="sQuery">—</div><div class="label">Query latency</div></div>
+  <div class="card"><div class="val" id="sMemory">—</div><div class="label">Memory / row</div></div>
+  <div class="card"><div class="val" id="sRecall">—</div><div class="label">Recall@10</div></div>
+  <div class="card"><div class="val" id="sThroughput">—</div><div class="label">Queries / sec</div></div>
+</div>
+
+<div id="charts"></div>
+
+<table id="resultsTable">
+  <thead>
+    <tr><th>Phase</th><th>Metric</th><th>Value</th><th>Notes</th></tr>
+  </thead>
+  <tbody id="resultsBody"></tbody>
+</table>
+
+<details class="log-area">
+  <summary>Detailed log</summary>
+  <pre id="log">ready.</pre>
+</details>
+
+<script type="module">
+import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const log = (msg, cls = '') => $('log').innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`;
+
+// ---- Generate synthetic text documents at scale ----
+// We create realistic-looking "documents" from a template system so every
+// document is unique but has coherent word distribution for the embedder.
+const WORDS = [
+  'the', 'a', 'an', 'this', 'that', 'these', 'those', 'is', 'are', 'was', 'were',
+  'has', 'have', 'had', 'will', 'would', 'could', 'should', 'may', 'might', 'must',
+  'and', 'or', 'but', 'if', 'because', 'while', 'when', 'where', 'how', 'what',
+  'data', 'system', 'user', 'process', 'function', 'result', 'value', 'method',
+  'access', 'query', 'search', 'index', 'store', 'vector', 'matrix', 'tensor',
+  'network', 'model', 'layer', 'input', 'output', 'training', 'inference',
+  'database', 'server', 'client', 'application', 'interface', 'protocol',
+  'memory', 'buffer', 'cache', 'thread', 'process', 'kernel', 'driver',
+  'performance', 'latency', 'throughput', 'bandwidth', 'capacity', 'limit',
+  'algorithm', 'optimization', 'parallel', 'distributed', 'concurrent',
+  'analysis', 'synthesis', 'extraction', 'transformation', 'computation',
+  'document', 'record', 'entry', 'field', 'schema', 'format', 'structure',
+  'secure', 'encrypt', 'decrypt', 'authenticate', 'authorize', 'validate',
+  'graphics', 'render', 'compute', 'shader', 'pipeline', 'buffer', 'dispatch',
+  'similarity', 'distance', 'metric', 'cosine', 'euclidean', 'dot', 'product',
+  'feature', 'embedding', 'representation', 'dimension', 'compression',
+  'cluster', 'centroid', 'nearest', 'neighbor', 'candidate', 'search', 'scan',
+  'build', 'compile', 'execute', 'deploy', 'configure', 'initialize', 'launch',
+];
+
+const TOPICS = [
+  ['database', 'query', 'index', 'store', 'search', 'latency', 'performance'],
+  ['graphics', 'render', 'compute', 'shader', 'pipeline', 'buffer', 'kernel'],
+  ['security', 'encrypt', 'authenticate', 'secure', 'validate', 'access'],
+  ['machine learning', 'training', 'model', 'network', 'layer', 'embedding', 'feature'],
+  ['systems', 'memory', 'thread', 'process', 'cache', 'parallel', 'distributed'],
+  ['data', 'analysis', 'extraction', 'transformation', 'schema', 'record'],
+  ['vectors', 'similarity', 'distance', 'cosine', 'nearest', 'neighbor', 'cluster'],
+];
+
+function generateDocument(idx) {
+  const topic = TOPICS[idx % TOPICS.length];
+  const words = [...topic];
+
+  // Add random words to reach desired length (30-60 words)
+  const len = 30 + (idx % 30);
+  while (words.length < len) {
+    words.push(WORDS[(idx * 7 + words.length * 13) % WORDS.length]);
+  }
+
+  // Build 2-3 sentences
+  const sentences = [];
+  const perSentence = Math.ceil(words.length / (2 + (idx % 2)));
+  for (let s = 0; s < words.length; s += perSentence) {
+    const chunk = words.slice(s, s + perSentence);
+    const start = chunk[0].charAt(0).toUpperCase() + chunk[0].slice(1);
+    sentences.push(start + ' ' + chunk.slice(1).join(' ') + '.');
+  }
+
+  return {
+    id: `doc-${idx}`,
+    text: sentences.join(' '),
+    topic: topic[0],
+  };
+}
+
+function generateCorpus(n) {
+  const docs = [];
+  for (let i = 0; i < n; i++) docs.push(generateDocument(i));
+  return docs;
+}
+
+// ---- Benchmark runner ----
+async function benchmark(corpus, dim, indexType) {
+  const n = corpus.length;
+  const k = 10;
+  const queries = 50;
+  const embedder = hashingEmbedder({ dimension: dim });
+
+  let quantBits = 0;
+  let ann = undefined;
+  let label = '';
+
+  switch (indexType) {
+    case 'flat': label = 'Flat fp32'; break;
+    case 'int8': label = 'Quant int8'; quantBits = 8; break;
+    case 'int4': label = 'Quant int4'; quantBits = 4; break;
+    case 'ivf': label = 'IVF'; ann = {}; break;
+    case 'ivf-int8': label = 'IVF × int8'; quantBits = 8; ann = {}; break;
+    case 'ivf-int4': label = 'IVF × int4'; quantBits = 4; ann = {}; break;
+  }
+
+  const results = { label, n, dim, indexType, phases: [] };
+  const add = (phase, metric, val, note = '') => {
+    results.phases.push({ phase, metric, val, note });
+    return val;
+  };
+
+  // Phase 1: Create
+  let t = performance.now();
+  const db = await BrowserVec.create({
+    dimension: dim,
+    metric: 'cosine',
+    embedder,
+    quantBits,
+    ann,
+  });
+  add('create', 'time', (performance.now() - t).toFixed(1) + ' ms');
+
+  // Phase 2: Ingest
+  // For large N, ingest in batches to show progress
+  const batchSize = Math.min(5000, Math.ceil(n / 10));
+  t = performance.now();
+  for (let i = 0; i < corpus.length; i += batchSize) {
+    const batch = corpus.slice(i, i + batchSize);
+    await db.addTexts(batch.map(d => ({ id: d.id, text: d.text, metadata: { topic: d.topic } })));
+  }
+  const ingestMs = performance.now() - t;
+  const ingestRate = n / (ingestMs / 1000);
+  add('ingest', 'total time', ingestMs.toFixed(0) + ' ms');
+  add('ingest', 'rate', (ingestRate / 1000).toFixed(1) + 'k docs/s', `${(ingestRate).toFixed(0)} docs/s`);
+
+  // Stats after ingest
+  const stats = db.stats();
+  if (stats.chunks > 1) add('ingest', 'GPU chunks', stats.chunks);
+  if (stats.ingest) add('ingest', 'ingest path', stats.ingest);
+  if (stats.nlist) add('build', 'IVF nlist', stats.nlist);
+
+  // Phase 3: Warm up (first query compiles shaders)
+  const warm = corpus[(Math.random() * n) | 0];
+  await db.queryText(warm.text, { k });
+
+  // Phase 4: Query latency
+  const qs = Array.from({ length: queries }, () => corpus[(Math.random() * n) | 0]);
+
+  t = performance.now();
+  for (const q of qs) {
+    await db.queryText(q.text, { k });
+  }
+  const queryMs = (performance.now() - t) / queries;
+  const qps = queries / ((performance.now() - t) / 1000);
+  add('query', 'avg latency', queryMs.toFixed(2) + ' ms');
+  add('query', 'queries/sec', qps.toFixed(0));
+  add('query', 'batch size', queries);
+
+  // Phase 5: Recall (compare quantized/IVF against fp32 flat reference)
+  if (indexType !== 'flat') {
+    log('Building fp32 reference for recall comparison...');
+
+    // Create a reference fp32 store with the same corpus
+    // (limit the recall check to a smaller subset to keep benchmark fast)
+    const refN = Math.min(n, 10000);
+    const refQs = qs.slice(0, Math.min(20, queries));
+    const refCorpus = corpus.slice(0, refN);
+
+    const refDb = await BrowserVec.create({ dimension: dim, metric: 'cosine', embedder });
+    await refDb.addTexts(refCorpus.map(d => ({ id: d.id, text: d.text })));
+    await refDb.queryText(refQs[0].text, { k });
+
+    const truth = [];
+    for (const q of refQs) {
+      const hits = await refDb.queryText(q.text, { k });
+      truth.push(new Set(hits.map(h => h.id)));
+    }
+
+    // Check recall against the test index
+    if (indexType.startsWith('ivf')) {
+      // IVF needs to be told to use more probes for best recall
+      const nprobes = [4, 16];
+      for (const np of nprobes) {
+        let hit = 0;
+        for (let i = 0; i < refQs.length; i++) {
+          const got = await refDb.queryText(refQs[i].text, { k, nprobe: np });
+          hit += got.filter(h => truth[i].has(h.id)).length;
+        }
+        const recall = hit / (refQs.length * k);
+        add('recall', `recall@${k} nprobe=${np}`, (recall * 100).toFixed(1) + '%', `vs fp32 flat (${refN} docs)`);
+      }
+    } else {
+      let hit = 0;
+      for (let i = 0; i < refQs.length; i++) {
+        const got = await refDb.queryText(refQs[i].text, { k });
+        hit += got.filter(h => truth[i].has(h.id)).length;
+      }
+      const recall = hit / (refQs.length * k);
+      add('recall', `recall@${k}`, (recall * 100).toFixed(1) + '%', `vs fp32 flat (${refN} docs)`);
+    }
+
+    refDb.destroy();
+  } else {
+    add('recall', 'recall@10', '— (baseline)', 'fp32 flat is the reference');
+  }
+
+  // Phase 6: Memory estimate
+  const padDim = (dim <= 4 ? 4 : (() => { let p = 4; while (p < dim) p <<= 1; return p; })());
+  let bytesPerRow;
+  if (quantBits === 0) bytesPerRow = dim * 4;
+  else if (quantBits === 8) bytesPerRow = padDim; // 1 byte per coord = dim bytes, padded
+  else bytesPerRow = padDim / 2;
+  const totalBytes = bytesPerRow * n;
+  add('memory', 'bytes/row', bytesPerRow, `${quantBits === 0 ? 'fp32' : 'int' + quantBits}`);
+  add('memory', 'total GPU', (totalBytes / (1024 * 1024)).toFixed(1) + ' MiB');
+  if (totalBytes > 100 * 1024 * 1024) {
+    add('memory', 'note', '⚠ >100 MiB — may trigger chunking on some devices', '');
+  }
+
+  db.destroy();
+  return results;
+}
+
+// ---- Render results ----
+function renderResults(allResults) {
+  const tbody = $('resultsBody');
+  const logEl = $('log');
+  tbody.innerHTML = '';
+  logEl.textContent = '';
+
+  for (const r of allResults) {
+    // Section header
+    const hdr = tbody.insertRow();
+    hdr.style.background = '#f0f0f0';
+    hdr.innerHTML = `<td colspan="4"><strong>${r.label}</strong> — ${r.n.toLocaleString()} docs × ${r.dim} dim</td>`;
+
+    for (const p of r.phases) {
+      const tr = tbody.insertRow();
+      tr.innerHTML = `<td>${p.phase}</td><td>${p.metric}</td><td>${p.val}</td><td style="color:#888;font-size:.75rem">${p.note}</td>`;
+    }
+
+    // Log
+    log(`=== ${r.label} (${r.n} × ${r.dim}) ===`);
+    for (const p of r.phases) log(`  ${p.phase} › ${p.metric}: ${p.val} ${p.note ? '— ' + p.note : ''}`);
+  }
+
+  // Update summary cards
+  const last = allResults[allResults.length - 1];
+  if (last) {
+    const ingestP = last.phases.find(p => p.phase === 'ingest' && p.metric === 'rate');
+    const queryP = last.phases.find(p => p.phase === 'query' && p.metric === 'avg latency');
+    const memP = last.phases.find(p => p.phase === 'memory' && p.metric === 'total GPU');
+    const recallP = last.phases.find(p => p.phase === 'recall' && p.metric.includes('recall@10') && !p.metric.includes('nprobe'));
+    const qpsP = last.phases.find(p => p.phase === 'query' && p.metric === 'queries/sec');
+
+    $('sCorpus').textContent = last.n.toLocaleString();
+    $('sIngest').textContent = ingestP?.val || '—';
+    $('sQuery').textContent = queryP?.val || '—';
+    $('sMemory').textContent = memP?.val || '—';
+    $('sRecall').textContent = recallP?.val || '—';
+    $('sThroughput').textContent = qpsP?.val || '—';
+
+    // Color-code recall
+    if (recallP) {
+      const v = parseFloat(recallP.val);
+      const el = $('sRecall');
+      el.className = 'val' + (v >= 90 ? ' good' : v >= 70 ? ' warn' : '');
+    }
+  }
+
+  // Bar chart comparison
+  if (allResults.length > 1) {
+    renderComparisonChart(allResults);
+  }
+}
+
+function renderComparisonChart(results) {
+  const container = $('charts');
+  container.innerHTML = '<h3 style="font-size:.9rem;margin:.5rem 0;">Latency comparison</h3>';
+
+  const maxLatency = Math.max(...results.map(r => {
+    const p = r.phases.find(x => x.phase === 'query' && x.metric === 'avg latency');
+    return p ? parseFloat(p.val) : 0;
+  }));
+
+  for (const r of results) {
+    const p = r.phases.find(x => x.phase === 'query' && x.metric === 'avg latency');
+    const val = p ? parseFloat(p.val) : 0;
+    const pct = maxLatency > 0 ? (val / maxLatency * 100) : 0;
+    const color = val <= 1 ? '#2e7d32' : val <= 5 ? '#e65100' : '#d32f2f';
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `
+      <span class="lbl">${r.label}</span>
+      <span class="bar-wrap">
+        <span class="bar" style="width:${Math.max(pct, 2)}%;background:${color}"></span>
+        ${val.toFixed(2)} ms
+      </span>
+    `;
+    container.appendChild(row);
+  }
+}
+
+// ---- Run ----
+async function runSingle(indexType) {
+  const n = parseInt($('docCount').value);
+  const dim = parseInt($('dimension').value);
+
+  log(`Generating ${n.toLocaleString()} documents (dim=${dim})...`);
+  await new Promise(r => setTimeout(r, 50)); // let UI breathe
+
+  const corpus = generateCorpus(n);
+
+  log(`Starting benchmark: ${indexType}...`);
+  const results = await benchmark(corpus, dim, indexType);
+  results.label += ` (${n.toLocaleString()} docs)`;
+
+  renderResults([results]);
+}
+
+async function runAll() {
+  const n = parseInt($('docCount').value);
+  const dim = parseInt($('dimension').value);
+  const all = ['flat', 'int8', 'int4', 'ivf', 'ivf-int8', 'ivf-int4'];
+
+  $('runBtn').disabled = true;
+  $('compareBtn').disabled = true;
+  log('');
+  log(`========== COMPREHENSIVE BENCHMARK ==========`);
+  log(`Corpus: ${n.toLocaleString()} synthetic documents, ${dim}-dim embeddings`);
+  log(`Running ${all.length} index types...`);
+  log('');
+
+  const corpus = generateCorpus(n);
+  const allResults = [];
+  const startTotal = performance.now();
+
+  for (const idx of all) {
+    log(`--- Benchmarking: ${idx} ---`);
+    try {
+      const r = await benchmark(corpus, dim, idx);
+      r.label = idx;
+      allResults.push(r);
+    } catch (e) {
+      log(`ERROR on ${idx}: ${e.message}`, 'bad');
+    }
+    log('');
+  }
+
+  const totalMs = (performance.now() - startTotal).toFixed(0);
+  log(`Total benchmark time: ${totalMs} ms`);
+
+  renderResults(allResults);
+  $('configNote').textContent = `All index types tested on ${n.toLocaleString()} × ${dim} synthetic documents. FP32 recall reference uses subset of ${Math.min(n, 10000)} docs.`;
+
+  $('runBtn').disabled = false;
+  $('compareBtn').disabled = false;
+}
+
+// ---- Event handlers ----
+$('runBtn').onclick = () => runSingle($('indexType').value);
+$('compareBtn').onclick = runAll;
+
+// Show config note on change
+function updateConfigNote() {
+  const n = parseInt($('docCount').value);
+  const dim = parseInt($('dimension').value);
+  const idx = $('indexType').value;
+
+  let estBytes = dim * 4; // fp32
+  if (idx === 'int8') estBytes = dim;
+  else if (idx === 'int4') estBytes = dim / 2;
+
+  const totalMB = (estBytes * n / (1024 * 1024)).toFixed(0);
+  let note = `${n.toLocaleString()} docs × ${dim} dim × ${idx} ≈ ~${totalMB} MiB GPU memory`;
+  if (parseInt(totalMB) > 200) note += ' ⚠ Large — may trigger chunking.';
+  if (idx === 'ivf-int8' || idx === 'ivf-int4') note += ' IVF × quant combo — the 1M path.';
+  if (idx === 'ivf') note += ' IVF (fp32) is not chunked — limit to ≤ ~40k × 768.';
+  $('configNote').textContent = note;
+}
+
+$('docCount').onchange = updateConfigNote;
+$('dimension').onchange = updateConfigNote;
+$('indexType').onchange = updateConfigNote;
+updateConfigNote();
+
+log('Ready. Configure and click "Run Benchmark" for a single index, or "Run All Indexes" for comparison.');
+</script>
+</body>
+</html>

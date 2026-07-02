@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 05. Text retrieval</title>
+<style>body{font:14px/1.5 ui-monospace,monospace;margin:2rem;max-width:780px}pre{background:#111;color:#b9f;padding:1rem;border-radius:6px;overflow:auto}button{font:inherit;padding:.4rem .8rem;cursor:pointer}.ok{color:#5c5}.bad{color:#f55}.dim{color:#888}.hl{color:#fe9}h2{font-size:1.1rem;border-bottom:1px solid #333;padding-bottom:.25rem}</style>
+</head>
+<body>
+<h1>05. Text retrieval (M5)</h1>
+<p class="dim">End-to-end offline text search: documents in, queries in, results out — all on-device. Uses the bundled <b>hashingEmbedder</b> (zero-dep, lexical, offline). For semantic search, swap in <code>transformersEmbedder</code> — same API.</p>
+
+<pre id="out">ready.</pre>
+
+<button id="run">Run text retrieval</button>
+
+<script type="module">
+import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const out = $('out');
+const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`);
+
+$('run').onclick = async () => {
+  out.textContent = '';
+  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+  // 1. Create an embedder and store
+  const embedder = hashingEmbedder({ dimension: 384 });
+  const db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder });
+  log(`embedder dim=${embedder.dimension}`, 'dim');
+
+  // 2. Ingest documents via addTexts
+  const docs = [
+    { id: 'd1', text: 'WebGPU compute shaders run massively parallel kernels on the GPU' },
+    { id: 'd2', text: 'Cosine similarity measures the angle between two vectors' },
+    { id: 'd3', text: 'Sourdough bread needs a long fermentation of the dough' },
+    { id: 'd4', text: 'Quantization stores vectors as int8 to save memory bandwidth' },
+    { id: 'd5', text: 'The cat slept on the warm windowsill all afternoon' },
+    { id: 'd6', text: 'IVF clustering scans only the nearest cells to speed up search' },
+    { id: 'd7', text: 'A GPU kernel is a function that runs on the graphics processor' },
+    { id: 'd8', text: 'IndexedDB is a client-side storage API in the browser' },
+  ];
+
+  log(`\n--- Ingest ${docs.length} documents ---`);
+  let t = performance.now();
+  await db.addTexts(docs.map((d) => ({ ...d, metadata: { text: d.text } })));
+  log(`ingested ${db.count} docs in ${(performance.now() - t).toFixed(0)} ms`, 'ok');
+
+  // 3. Query by text
+  const queries = [
+    'gpu parallel computing',
+    'vector similarity measurement',
+    'baking bread at home',
+    'memory efficient storage',
+  ];
+
+  log(`\n--- Text queries (k=2) ---`);
+  for (const q of queries) {
+    const hits = await db.queryText(q, { k: 2 });
+    log(`\nquery: "${q}"`);
+    for (const h of hits) {
+      log(`  ${h.score.toFixed(3)}  ${h.metadata?.text ?? h.id}`, 'dim');
+    }
+  }
+
+  // 4. mix of addText and addTexts
+  log(`\n--- Adding more documents ---`);
+  await db.addText({ id: 'd9', text: 'Vector databases enable semantic search on embeddings', metadata: { text: 'Vector databases enable semantic search on embeddings' } });
+  log(`added single doc, total: ${db.count}`);
+
+  // 5. Stats
+  log(`\n--- Stats ---`);
+  log(JSON.stringify(db.stats(), null, 2), 'dim');
+
+  log(`\nNote: hashingEmbedder is lexical (keyword overlap), not semantic.`, 'dim');
+  log(`For meaning-based search, use transformersEmbedder() — same API.`, 'dim');
+
+  db.destroy();
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 13. Metric comparison</title>
+<style>body{font:14px/1.5 ui-monospace,monospace;margin:2rem;max-width:780px}pre{background:#111;color:#b9f;padding:1rem;border-radius:6px;overflow:auto}button{font:inherit;padding:.4rem .8rem;cursor:pointer}.ok{color:#5c5}.bad{color:#f55}.dim{color:#888}.hl{color:#fe9}h2{font-size:1.1rem;border-bottom:1px solid #333;padding-bottom:.25rem}</style>
+</head>
+<body>
+<h1>13. Metric comparison</h1>
+<p class="dim">BrowserVec supports three similarity metrics: <b>cosine</b> (angle between vectors), <b>dot</b> (un-normalized dot product), and <b>l2</b> (negative squared Euclidean distance). Only cosine and dot support quantization. For all metrics, <b>higher score = closer</b>.</p>
+
+<pre id="out">ready.</pre>
+
+<p><label>dim <input id="dim" type="number" value="64" /></label>
+<button id="run">Compare metrics</button></p>
+
+<script type="module">
+import { BrowserVec } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const out = $('out');
+const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`);
+const rand = (dim) => { const v = new Float32Array(dim); for (let i = 0; i < dim; i++) v[i] = Math.random() * 2 - 1; return v; };
+
+$('run').onclick = async () => {
+  out.textContent = '';
+  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+  const dim = +$('dim').value;
+
+  // Create three identical stores with different metrics
+  const configs = [
+    { metric: 'cosine', label: 'Cosine similarity', note: 'Measures angle, not magnitude. Normalizes vectors. Range [-1, 1].' },
+    { metric: 'dot',    label: 'Dot product',       note: 'Raw dot product — sensitive to vector magnitude. No upper bound.' },
+    { metric: 'l2',     label: 'L2 (Euclidean)',     note: 'Negative squared distance. Higher = closer (less distance).' },
+  ];
+
+  for (const cfg of configs) {
+    log(`\n--- ${cfg.label} (${cfg.metric}) ---`);
+    log(cfg.note, 'dim');
+
+    const db = await BrowserVec.create({ dimension: dim, metric: cfg.metric });
+    const corpus = Array.from({ length: 1000 }, (_, i) => ({ id: `v${i}`, vector: rand(dim) }));
+    await db.addBatch(corpus);
+
+    // Add a vector that's exactly the query to see the "perfect match" score
+    const query = rand(dim);
+    await db.add({ id: 'perfect-match', vector: query });
+
+    const hits = await db.query(query, { k: 5 });
+    log(`results (k=5):`);
+    for (const h of hits) {
+      const cls = h.id === 'perfect-match' ? 'ok' : 'dim';
+      log(`  ${h.id.padStart(18)}  score ${h.score.toFixed(6)}`, cls);
+    }
+    log(`perfect match score: ${hits[0].score.toFixed(6)} (note how it differs per metric)`);
+
+    // Demonstrate metric-specific behavior
+    if (cfg.metric === 'cosine') {
+      log(`cosine perfect match = 1.0 (vectors are identical direction)`);
+    } else if (cfg.metric === 'l2') {
+      log(`l2 perfect match = 0.0 (zero distance, negated)`);
+    }
+
+    db.destroy();
+  }
+
+  // Metric + quantization compatibility
+  log(`\n--- Metric & quantization compatibility ---`);
+  log(`Quantization (int8/int4) supports cosine and dot, but NOT l2.`, 'dim');
+  log(`IVF (ANN) supports cosine and dot, but NOT l2.`, 'dim');
+
+  log(`\n--- Quantization + metric restrictions ---`);
+  try {
+    const bad = await BrowserVec.create({ dimension: 64, metric: 'l2', quantBits: 8 });
+    await bad.addBatch([{ id: 'x', vector: rand(64) }]);
+    log(`l2 + quant: unexpectedly succeeded`, 'bad');
+    bad.destroy();
+  } catch (e) {
+    log(`l2 + quantBits=8 rejected: ${e.message}`, 'ok');
+  }
+
+  try {
+    const bad2 = await BrowserVec.create({ dimension: 64, metric: 'l2', ann: {} });
+    await bad2.addBatch([{ id: 'x', vector: rand(64) }]);
+    log(`l2 + ANN: unexpectedly succeeded`, 'bad');
+    bad2.destroy();
+  } catch (e) {
+    log(`l2 + ANN rejected: ${e.message}`, 'ok');
+  }
+
+  log(`\n--- Key takeaway ---`);
+  log(`"higher score = closer" holds for ALL metrics — unified query path.`, 'ok');
+  log(`Use cosine for normalized similarity, dot for raw magnitude, l2 for Euclidean distance.`, 'dim');
+};
+</script>
+</body>
+</html>

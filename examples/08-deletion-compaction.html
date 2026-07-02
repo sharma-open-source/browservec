@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 08. Delete & compaction</title>
+<style>body{font:14px/1.5 ui-monospace,monospace;margin:2rem;max-width:780px}pre{background:#111;color:#b9f;padding:1rem;border-radius:6px;overflow:auto}button{font:inherit;padding:.4rem .8rem;cursor:pointer}.ok{color:#5c5}.bad{color:#f55}.dim{color:#888}.hl{color:#fe9}h2{font-size:1.1rem;border-bottom:1px solid #333;padding-bottom:.25rem}</style>
+</head>
+<body>
+<h1>08. Delete & compaction (M1 / M2)</h1>
+<p class="dim">Deletes are <b>tombstones</b>: the id vanishes from results instantly (no GPU rewrite). Memory is reclaimed when the store is persisted + reloaded (snapshots compact out deleted rows). Also demonstrates <b>update</b> (tombstone + append) and <b>compact()</b> (in-place rebuild).</p>
+
+<pre id="out">ready.</pre>
+
+<p><button id="run">Run delete/update/compact demo</button></p>
+
+<script type="module">
+import { BrowserVec } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const out = $('out');
+const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`);
+const rand = (dim) => { const v = new Float32Array(dim); for (let i = 0; i < dim; i++) v[i] = Math.random() * 2 - 1; return v; };
+const clusteredCorpus = (n, dim, nCenters, spread) => {
+  const centers = Array.from({ length: nCenters }, () => rand(dim));
+  return Array.from({ length: n }, () => {
+    const c = centers[(Math.random() * nCenters) | 0];
+    const v = new Float32Array(dim);
+    for (let d = 0; d < dim; d++) v[d] = c[d] + (Math.random() * 2 - 1) * spread;
+    return v;
+  });
+};
+
+$('run').onclick = async () => {
+  out.textContent = '';
+  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+  const dim = 128;
+  const n = 5000;
+  const k = 10;
+
+  for (const cfg of [{ label: 'fp32' }, { label: 'int8 x IVF', quantBits: 8, ann: {} }]) {
+    log(`\n========== ${cfg.label} ==========`);
+
+    const corpus = clusteredCorpus(n, dim, 40, 0.35);
+    const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+    const base = { dimension: dim, metric: 'cosine' };
+    if (cfg.quantBits) base.quantBits = cfg.quantBits;
+    if (cfg.ann) base.ann = cfg.ann;
+
+    const db = await BrowserVec.create(base);
+    await db.addBatch(records);
+    log(`ingested ${db.count} vectors`);
+
+    // 1. Basic delete
+    log(`\n--- 1. Basic delete ---`);
+    const q = corpus[123];
+    const first = await db.query(q, { k });
+    const top1 = first[0].id;
+    log(`original top-1: ${top1}`);
+
+    const removed = db.delete(top1);
+    const second = await db.query(q, { k });
+    const stillThere = second.some((h) => h.id === top1);
+    log(`delete(${top1}) -> ${removed}, count=${db.count}, tombstones=${db.stats().deleted}`);
+    log(`deleted id in results: ${stillThere} (should be false)`, !stillThere ? 'ok' : 'bad');
+    log(`still returned ${second.length} results (over-fetched past tombstone)`, second.length === k ? 'ok' : 'bad');
+
+    // 2. Delete an absent id
+    log(`\n--- 2. Delete absent id ---`);
+    log(`delete('nonexistent') -> ${db.delete('nonexistent')} (should be false)`);
+
+    // 3. get() after delete returns null
+    log(`\n--- 3. get() after delete ---`);
+    log(`get('${top1}') -> ${db.get(top1)} (should be null)`);
+
+    // 4. Update (upsert)
+    log(`\n--- 4. Update (upsert) ---`);
+    const updated = db.delete('v999');
+    await db.add({ id: 'v999', vector: rand(dim) });
+    log(`update existing v999 -> existed=${updated}`);
+    log(`get('v999') -> ${db.get('v999') ? 'found' : 'null'}`);
+
+    // 5. Export/import drops tombstones (snapshots are compacted)
+    log(`\n--- 5. Export/import compacts tombstones ---`);
+    for (let i = 0; i < 100; i++) db.delete(`v${i}`);
+    const beforeCount = db.count;
+    const beforeDeleted = db.stats().deleted;
+    log(`after deleting 100 more: count=${beforeCount}, tombstones=${beforeDeleted}`);
+
+    const blob = await db.export();
+    const reloaded = await BrowserVec.import(blob, cfg.quantBits ? { quantBits: cfg.quantBits, ann: cfg.ann } : {});
+    const gone = reloaded.get('v0') === null;
+    log(`export/reload count=${reloaded.count}, tombstones=${reloaded.stats().deleted ?? 0}`);
+    log(`deleted ids absent after reload: ${gone}`, gone ? 'ok' : 'bad');
+    log(`memory reclaimed: ${reloaded.stats().deleted === undefined || reloaded.stats().deleted === 0 ? 'YES' : 'NO'}`, 'ok');
+
+    db.destroy();
+    reloaded.destroy();
+  }
+
+  log(`\n--- Key point ---`);
+  log(`Tombstone deletes are cheap (O(1), no GPU rewrite).`);
+  log(`Snapshots are always compacted (only live rows).`);
+  log(`compact() rebuilds in-place without save/reload — useful for repeated updates.`, 'dim');
+};
+</script>
+</body>
+</html>

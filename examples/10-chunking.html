@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 10. Corpus chunking</title>
+<style>body{font:14px/1.5 ui-monospace,monospace;margin:2rem;max-width:780px}pre{background:#111;color:#b9f;padding:1rem;border-radius:6px;overflow:auto}button{font:inherit;padding:.4rem .8rem;cursor:pointer}.ok{color:#5c5}.bad{color:#f55}.dim{color:#888}.hl{color:#fe9}h2{font-size:1.1rem;border-bottom:1px solid #333;padding-bottom:.25rem}</style>
+</head>
+<body>
+<h1>10. Corpus chunking (NFR-10)</h1>
+<p class="dim">A single GPU storage buffer is capped by <code>maxStorageBufferBindingSize</code> (128 MiB on many devices). The flat index spreads vectors across multiple <b>chunks</b> — each fits within the limit — and queries dispatch the distance kernel once per chunk. The result is <b>identical</b> to a single-buffer scan.</p>
+
+<pre id="out">ready.</pre>
+
+<p>
+<label>vectors <input id="n" type="number" value="80000" /></label>
+<label>dim <input id="dim" type="number" value="768" /></label>
+<button id="run">Test chunking</button>
+</p>
+
+<script type="module">
+import { BrowserVec } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const out = $('out');
+const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`);
+const rand = (dim) => { const v = new Float32Array(dim); for (let i = 0; i < dim; i++) v[i] = Math.random() * 2 - 1; return v; };
+
+function clusteredCorpus(n, dim, nCenters, spread) {
+  const centers = Array.from({ length: nCenters }, () => rand(dim));
+  return Array.from({ length: n }, () => {
+    const c = centers[(Math.random() * nCenters) | 0];
+    const v = new Float32Array(dim);
+    for (let d = 0; d < dim; d++) v[d] = c[d] + (Math.random() * 2 - 1) * spread;
+    return v;
+  });
+}
+
+const nextPow2 = (n) => { let p = 4; while (p < n) p <<= 1; return p; };
+
+$('run').onclick = async () => {
+  out.textContent = '';
+  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+
+  const n = +$('n').value;
+  const dim = +$('dim').value;
+  const k = 10;
+  const queries = 30;
+  const chunkRows = 25000; // Force small chunks to exercise the path.
+
+  const corpus = clusteredCorpus(n, dim, 200, 0.35);
+  const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+  const qs = Array.from({ length: queries }, () => corpus[(Math.random() * n) | 0]);
+
+  // Test three index types: fp32 flat, int8 flat, int8 x IVF
+  const configs = [
+    { label: 'fp32 flat', quantBits: 0 },
+    { label: 'int8 flat', quantBits: 8 },
+    { label: 'int8 x IVF', quantBits: 8, ann: {} },
+  ];
+
+  for (const cfg of configs) {
+    log(`\n--- ${cfg.label} ---`);
+
+    // Reference: single-buffer store (natural chunking, likely 1 chunk)
+    const base = { dimension: dim, metric: 'cosine', quantBits: cfg.quantBits };
+    if (cfg.ann) base.ann = cfg.ann;
+
+    const ref = await BrowserVec.create(base);
+    await ref.addBatch(records);
+    await ref.query(qs[0], { k });
+    const truth = [];
+    for (const q of qs) truth.push((await ref.query(q, { k })).map((h) => h.id).join(','));
+    ref.destroy();
+
+    // Chunked store: forced chunkRows so it spans multiple GPU buffers
+    const db = await BrowserVec.create({ ...base, chunkRows });
+
+    let t = performance.now();
+    await db.addBatch(records);
+    const ingestMs = performance.now() - t;
+
+    const st = db.stats();
+    const bytesPerRow = cfg.quantBits === 0
+      ? dim * 4
+      : (nextPow2(dim) / (cfg.quantBits === 8 ? 4 : 8)) * 4;
+
+    await db.query(qs[0], { k });
+    t = performance.now();
+    let identical = 0;
+    for (let i = 0; i < qs.length; i++) {
+      const ids = (await db.query(qs[i], { k })).map((h) => h.id).join(',');
+      if (ids === truth[i]) identical++;
+    }
+    const qMs = (performance.now() - t) / qs.length;
+
+    const okChunks = st.chunks > 1;
+    const okMatch = identical === qs.length;
+    const chunkSizeMiB = (chunkRows * bytesPerRow) / 2 ** 20;
+
+    log(`spans ${st.chunks} GPU buffers (${chunkSizeMiB.toFixed(0)} MiB each)`, okChunks ? 'ok' : '');
+    log(`ingest: ${ingestMs.toFixed(0)} ms, query: ${qMs.toFixed(3)} ms/q`);
+    log(`top-${k} identical to single-buffer: ${identical}/${queries}`, okMatch ? 'ok' : 'bad');
+
+    db.destroy();
+  }
+
+  log(`\n✅ Chunking is exact — a corpus can exceed one GPU buffer.`, 'ok');
+  log(`Chunking is automatic (triggered by maxStorageBufferBindingSize).`, 'dim');
+  log(`The chunkRows knob exists only to exercise the path in tests/demos.`, 'dim');
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 07. Encryption at rest</title>
+<style>body{font:14px/1.5 ui-monospace,monospace;margin:2rem;max-width:780px}pre{background:#111;color:#b9f;padding:1rem;border-radius:6px;overflow:auto}button{font:inherit;padding:.4rem .8rem;cursor:pointer}.ok{color:#5c5}.bad{color:#f55}.dim{color:#888}.hl{color:#fe9}h2{font-size:1.1rem;border-bottom:1px solid #333;padding-bottom:.25rem}</style>
+</head>
+<body>
+<h1>07. Encryption at rest (M6)</h1>
+<p class="dim">Persisted snapshots and exported blobs can be sealed with <b>AES-256-GCM</b> (passphrase stretched via PBKDF2-SHA256). Covers: encrypted save/load, wrong passphrase rejection, missing passphrase rejection, and encrypted export/import.</p>
+
+<pre id="out">ready.</pre>
+
+<p><button id="run">Run encryption demo</button></p>
+
+<script type="module">
+import { BrowserVec } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const out = $('out');
+const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`);
+const rand = (dim) => { const v = new Float32Array(dim); for (let i = 0; i < dim; i++) v[i] = Math.random() * 2 - 1; return v; };
+
+$('run').onclick = async () => {
+  out.textContent = '';
+  if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+  if (!globalThis.crypto?.subtle) return log('WebCrypto (crypto.subtle) unavailable.', 'bad');
+
+  const dim = 64;
+  const name = 'enc-example';
+  const pass = 'correct horse battery staple';
+  const records = Array.from({ length: 1500 }, (_, i) => ({
+    id: `doc-${i}`, vector: rand(dim), metadata: { lang: i % 2 ? 'en' : 'fr' },
+  }));
+  const probe = records[42].vector;
+
+  // 1. CREATE + SAVE encrypted
+  log(`--- Step 1: Create + ingest + save (encrypted) ---`);
+  let db = await BrowserVec.create({
+    dimension: dim, persist: { name, encryption: { passphrase: pass } },
+  });
+  await db.addBatch(records);
+  await db.save();
+  const before = (await db.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+  log(`saved ${db.count} vectors encrypted`, 'ok');
+  db.destroy();
+
+  // 2. RELOAD with CORRECT passphrase -> success
+  log(`\n--- Step 2: Reload with CORRECT passphrase ---`);
+  db = await BrowserVec.create({
+    dimension: dim, persist: { name, encryption: { passphrase: pass } },
+  });
+  const after = (await db.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+  log(`results: [${after}]`, after === before ? 'ok' : 'bad');
+  log(`decrypt round-trip: ${after === before ? 'OK' : 'MISMATCH'}`, after === before ? 'ok' : 'bad');
+  db.destroy();
+
+  // 3. RELOAD with WRONG passphrase -> must fail
+  log(`\n--- Step 3: Reload with WRONG passphrase ---`);
+  let rejected = false;
+  try {
+    const bad = await BrowserVec.create({
+      dimension: dim, persist: { name, encryption: { passphrase: 'wrong password' } },
+    });
+    bad.destroy();
+  } catch (e) {
+    rejected = true;
+    log(`correctly rejected: ${e.message}`, 'ok');
+  }
+  if (!rejected) log('SECURITY BUG: wrong passphrase was accepted', 'bad');
+
+  // 4. RELOAD with NO passphrase -> must fail
+  log(`\n--- Step 4: Reload with NO passphrase ---`);
+  let needsPass = false;
+  try {
+    const plain = await BrowserVec.create({ dimension: dim, persist: { name } });
+    plain.destroy();
+  } catch (e) {
+    needsPass = true;
+    log(`correctly rejected: ${e.message}`, 'ok');
+  }
+  if (!needsPass) log('BUG: encrypted blob loaded without passphrase', 'bad');
+
+  // 5. ENCRYPTED EXPORT / IMPORT
+  log(`\n--- Step 5: Encrypted export/import ---`);
+  const db2 = await BrowserVec.create({
+    dimension: dim, persist: { name, encryption: { passphrase: pass } },
+  });
+  const blob = await db2.export({ encryption: { passphrase: pass } });
+  log(`exported encrypted blob: ${(blob.size / 1024).toFixed(1)} KiB`);
+
+  const db3 = await BrowserVec.import(blob, { encryption: { passphrase: pass } });
+  const imported = (await db3.query(probe, { k: 3 })).map((h) => h.id).join(', ');
+  log(`import round-trip: [${imported}]`, imported === before ? 'ok' : 'bad');
+
+  // 6. IMPORT encrypted blob WITHOUT passphrase -> must fail
+  log(`\n--- Step 6: Import encrypted blob with no passphrase ---`);
+  let importRejected = false;
+  try {
+    await BrowserVec.import(blob);
+  } catch (e) {
+    importRejected = true;
+    log(`correctly rejected: ${e.message}`, 'ok');
+  }
+  if (!importRejected) log('BUG: encrypted import without passphrase accepted', 'bad');
+
+  db2.destroy();
+  db3.destroy();
+
+  log(`\nEncryption demonstration complete.`, 'ok');
+  log(`Each save uses a fresh random salt + IV — same data encrypts differently each time.`, 'dim');
+};
+</script>
+</body>
+</html>

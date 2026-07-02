@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — FAQ Support Bot</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 800px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  .subtitle { color: #666; margin-top: 0; font-size: .9rem; }
+  .layout { display: flex; gap: 1.5rem; margin: 1rem 0; }
+  @media (max-width: 700px) { .layout { flex-direction: column; } }
+  .faq-list { flex: 1; border: 1px solid #eee; border-radius: 8px; padding: .75rem; max-height: 500px; overflow-y: auto; }
+  .faq-list h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .05em; color: #888; margin: 0 0 .5rem 0; }
+  .faq-item { padding: .5rem; border-radius: 6px; cursor: pointer; margin-bottom: .25rem; font-size: .85rem; }
+  .faq-item:hover { background: #f5f5f5; }
+  .faq-item .q { font-weight: 500; }
+  .faq-item .a { font-size: .8rem; color: #666; margin-top: .15rem; display: none; }
+  .faq-item.open .a { display: block; }
+  .faq-item.matched { background: #e8f5e9; }
+  .faq-item.matched .q { color: #2e7d32; }
+  .chat-panel { flex: 1; border: 1px solid #eee; border-radius: 8px; padding: .75rem; display: flex; flex-direction: column; }
+  .chat-panel h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .05em; color: #888; margin: 0 0 .5rem 0; }
+  .chat-msgs { flex: 1; min-height: 250px; max-height: 400px; overflow-y: auto; display: flex; flex-direction: column; gap: .5rem; margin-bottom: .5rem; }
+  .msg { padding: .5rem .75rem; border-radius: 8px; font-size: .85rem; line-height: 1.4; }
+  .msg.user { background: #e3f2fd; align-self: flex-end; max-width: 85%; }
+  .msg.bot { background: #f5f5f5; align-self: flex-start; max-width: 100%; }
+  .msg .confidence { font-size: .7rem; color: #888; margin-top: .15rem; }
+  .input-row { display: flex; gap: .5rem; }
+  .input-row input { flex: 1; padding: .5rem; border: 1px solid #ddd; border-radius: 6px; font: inherit; }
+  .input-row button { padding: .5rem 1rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font: inherit; }
+  .input-row button:disabled { opacity: .5; cursor: not-allowed; }
+  .stats { font-size: .8rem; color: #888; margin-bottom: .5rem; }
+  pre { margin: 0; white-space: pre-wrap; }
+  .quick-btns { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .5rem; }
+  .quick-btns button { font-size: .75rem; padding: .25rem .5rem; border: 1px solid #ddd; border-radius: 12px; background: #fff; cursor: pointer; color: #555; }
+  .quick-btns button:hover { background: #f0f0f0; }
+</style>
+</head>
+<body>
+<h1>Customer Support FAQ</h1>
+<p class="subtitle">Users type their problem in natural language — BrowserVec finds the best FAQ answer semantically.</p>
+
+<div class="layout">
+  <div class="faq-list" id="faqList">
+    <h2>FAQ knowledge base</h2>
+    <div id="faqItems"></div>
+  </div>
+  <div class="chat-panel">
+    <h2>Support chat</h2>
+    <div class="chat-msgs" id="chatMsgs">
+      <div class="msg bot">Hi! I'm the support bot. Tell me what you need help with, and I'll find the answer.</div>
+    </div>
+    <div class="input-row">
+      <input id="queryInput" type="text" placeholder="Describe your problem..." />
+      <button id="sendBtn">Ask</button>
+    </div>
+    <div class="quick-btns">
+      <button data-q="I forgot my password">Forgot password</button>
+      <button data-q="How do I cancel my subscription">Cancel subscription</button>
+      <button data-q="The app keeps crashing">App crashing</button>
+      <button data-q="I didn't get a refund">Refund status</button>
+    </div>
+    <div class="stats" id="stats">Ready</div>
+  </div>
+</div>
+
+<script type="module">
+import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+
+const FAQ = [
+  { id: 'f1', question: 'How do I reset my password?', answer: 'Go to Settings > Account > Reset Password. A reset link will be sent to your email. If you don\'t receive it, check your spam folder or contact support.' },
+  { id: 'f2', question: 'How do I cancel my subscription?', answer: 'Navigate to Billing > Subscription > Cancel. Your access continues until the end of the billing period. No refunds for partial months.' },
+  { id: 'f3', question: 'The app keeps crashing on startup', answer: 'Clear the app cache: Settings > Apps > Clear Cache. Update to the latest version. If it persists, reinstall the app or contact our team with your device model and OS version.' },
+  { id: 'f4', question: 'Where is my refund?', answer: 'Refunds are processed within 5-10 business days. Check your original payment method. If it\'s been longer, contact your bank and then our billing team.' },
+  { id: 'f5', question: 'How do I export my data?', answer: 'Go to Settings > Privacy > Export Data. You\'ll receive a ZIP file with all your data within 24 hours. Available formats: CSV, JSON.' },
+  { id: 'f6', question: 'Can I use the service offline?', answer: 'Yes! The mobile app supports offline mode. Download content while connected, then access it without internet. Syncing happens automatically when reconnected.' },
+  { id: 'f7', question: 'How do I change my email address?', answer: 'Go to Settings > Account > Email. You\'ll need to verify the new address with a confirmation link sent to both old and new emails.' },
+  { id: 'f8', question: 'Payment failed but I was charged', answer: 'This is usually a pending authorization that will drop within 3-5 days. If the charge persists, contact your bank and share your receipt number with our support team.' },
+  { id: 'f9', question: 'How do I invite team members?', answer: 'Go to Settings > Team > Invite. Enter their email address. They\'ll receive an invitation link. You can set role permissions (Admin, Editor, Viewer) per invite.' },
+  { id: 'f10', question: 'My searches are slow', answer: 'Try narrowing your search with filters. Clear your search cache in Settings. If you have a large dataset, upgrade your plan for dedicated performance. Our servers index in real-time.' },
+  { id: 'f11', question: 'How do I delete my account?', answer: 'Go to Settings > Account > Delete Account. This action is permanent and cannot be undone. All your data will be erased within 30 days.' },
+  { id: 'f12', question: 'Two-factor authentication not working', answer: 'Make sure your device time is synced (auto time zone). Try regenerating backup codes in Security settings. If using an authenticator app, re-scan the QR code.' },
+  { id: 'f13', question: 'Can I recover deleted files?', answer: 'Deleted files go to Trash for 30 days. Go to Trash, select the file, and choose Restore. After 30 days, files are permanently deleted and cannot be recovered.' },
+  { id: 'f14', question: 'How do I integrate with Slack?', answer: 'Go to Integrations > Slack. Click Connect and authorize. You\'ll get notifications for: new comments, mentions, and status changes. Configure which events to receive.' },
+  { id: 'f15', question: 'Billing: why was I charged twice?', answer: 'Double charges are usually authorization holds. Each hold drops after 3-5 days. If both charges settle, contact our billing team with the transaction IDs for a refund.' },
+];
+
+let db;
+
+function addBotMessage(text, confidence = null) {
+  const chat = $('chatMsgs');
+  const div = document.createElement('div');
+  div.className = 'msg bot';
+  div.innerHTML = text;
+  if (confidence !== null) {
+    div.innerHTML += `<div class="confidence">Match confidence: ${(confidence * 100).toFixed(0)}%</div>`;
+  }
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function addUserMessage(text) {
+  const chat = $('chatMsgs');
+  const div = document.createElement('div');
+  div.className = 'msg user';
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function renderFAQ(matchedId = null) {
+  const container = $('faqItems');
+  container.innerHTML = FAQ.map(f => `
+    <div class="faq-item ${f.id === matchedId ? 'matched' : ''}" data-id="${f.id}">
+      <div class="q">${f.question}</div>
+      <div class="a">${f.answer}</div>
+    </div>
+  `).join('');
+
+  // Click to toggle answer
+  container.querySelectorAll('.faq-item').forEach(el => {
+    el.onclick = () => {
+      el.classList.toggle('open');
+      if (el.dataset.id === matchedId) {
+        el.classList.add('matched');
+      }
+    };
+  });
+
+  // Auto-open the matched FAQ
+  if (matchedId) {
+    const el = container.querySelector(`[data-id="${matchedId}"]`);
+    if (el) el.classList.add('open');
+  }
+}
+
+async function answerQuestion(query) {
+  if (!query.trim()) return;
+  addUserMessage(query);
+
+  const input = $('queryInput');
+  const btn = $('sendBtn');
+  input.disabled = true;
+  btn.disabled = true;
+
+  try {
+    const hits = await db.queryText(query, { k: 3 });
+
+    if (hits.length === 0 || hits[0].score < 0.1) {
+      addBotMessage("I couldn't find a direct answer to your question. Here are some things to try:\n\n- Rephrase your question\n- Check the FAQ list on the left\n- Contact our support team at help@example.com");
+    } else {
+      const top = hits[0];
+      const faq = FAQ.find(f => f.id === top.id);
+      if (!faq) return;
+
+      addBotMessage(`**${faq.question}**\n\n${faq.answer}`, top.score);
+      renderFAQ(top.id);
+    }
+  } catch (e) {
+    addBotMessage(`Sorry, something went wrong: ${e.message}`);
+  }
+
+  input.disabled = false;
+  btn.disabled = false;
+  input.focus();
+}
+
+async function init() {
+  $('stats').textContent = 'Checking WebGPU...';
+  if (!BrowserVec.isSupported().webgpu) {
+    $('stats').textContent = 'WebGPU not available.';
+    return;
+  }
+
+  $('stats').textContent = 'Indexing FAQ knowledge base...';
+
+  const embedder = hashingEmbedder({ dimension: 384 });
+  db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder });
+
+  await db.addTexts(FAQ.map(f => ({
+    id: f.id,
+    text: `${f.question} ${f.answer}`,
+    metadata: { question: f.question, answer: f.answer },
+  })));
+
+  renderFAQ();
+  $('stats').textContent = `${db.count} FAQ articles indexed`;
+
+  $('sendBtn').onclick = () => answerQuestion($('queryInput').value);
+  $('queryInput').onkeydown = (e) => { if (e.key === 'Enter') answerQuestion($('queryInput').value); };
+
+  // Quick question buttons
+  document.querySelectorAll('.quick-btns button').forEach(btn => {
+    btn.onclick = () => {
+      $('queryInput').value = btn.dataset.q;
+      answerQuestion(btn.dataset.q);
+    };
+  });
+}
+
+init();
+</script>
+</body>
+</html>

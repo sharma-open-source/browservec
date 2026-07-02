@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — Movie Recommender</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 860px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  .subtitle { color: #666; margin-top: 0; font-size: .9rem; }
+  .toolbar { display: flex; gap: .5rem; margin: 1rem 0; flex-wrap: wrap; align-items: center; }
+  .toolbar select, .toolbar input { padding: .5rem; border: 1px solid #ddd; border-radius: 6px; font: inherit; }
+  .toolbar select { min-width: 200px; }
+  .toolbar button { padding: .5rem 1rem; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; font: inherit; }
+  .toolbar button:disabled { opacity: .5; cursor: not-allowed; }
+  .toolbar label { font-size: .85rem; color: #555; }
+  .stats { font-size: .8rem; color: #888; margin-bottom: 1rem; }
+  .movies { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: .75rem; }
+  .movie { border: 1px solid #eee; border-radius: 10px; padding: .75rem; transition: box-shadow .15s; }
+  .movie:hover { box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+  .movie h3 { margin: 0 0 .25rem 0; font-size: .95rem; }
+  .movie .year { font-size: .75rem; color: #999; }
+  .movie .genre { font-size: .7rem; color: #666; margin-bottom: .25rem; }
+  .movie .desc { font-size: .8rem; color: #555; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .movie .score { font-size: .75rem; color: #1a73e8; margin-top: .25rem; font-weight: 500; }
+  .movie .tag-source { display: inline-block; font-size: .65rem; padding: .1rem .3rem; border-radius: 3px; background: #fff3e0; color: #e65100; margin-top: .25rem; }
+  .movie.selected { border-color: #1a73e8; background: #f8faff; }
+  .empty { color: #999; text-align: center; padding: 3rem; }
+</style>
+</head>
+<body>
+<h1>Movie Recommender</h1>
+<p class="subtitle">Pick a movie you like — BrowserVec finds similar ones by description (like "more like this").</p>
+
+<div class="toolbar">
+  <select id="movieSelect">
+    <option value="">— Select a movie —</option>
+  </select>
+  <button id="recommendBtn" disabled>Get Recommendations</button>
+  <label><input id="useIVF" type="checkbox" /> Use IVF (faster on large sets)</label>
+</div>
+
+<div class="stats" id="stats">Loading movie database...</div>
+<div class="movies" id="results"></div>
+
+<script type="module">
+import { BrowserVec, hashingEmbedder } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+
+// Sample movie database with descriptions
+const MOVIES = [
+  { id: 'm1', title: 'The Matrix', year: 1999, genre: 'Sci-Fi', desc: 'A computer hacker learns that reality is a simulation created by machines and joins a rebellion to free humanity.' },
+  { id: 'm2', title: 'Inception', year: 2010, genre: 'Sci-Fi', desc: 'A thief who steals corporate secrets through dream-sharing technology is given the task of planting an idea into a target\'s subconscious.' },
+  { id: 'm3', title: 'Blade Runner 2049', year: 2017, genre: 'Sci-Fi', desc: 'A young blade runner discovers a long-buried secret that leads him to track down former blade runner Rick Deckard.' },
+  { id: 'm4', title: 'The Prestige', year: 2006, genre: 'Drama', desc: 'Two rival magicians engage in a bitter feud to create the ultimate illusion, with devastating consequences.' },
+  { id: 'm5', title: 'Memento', year: 2000, genre: 'Thriller', desc: 'A man with short-term memory loss uses notes and tattoos to hunt for his wife\'s murderer.' },
+  { id: 'm6', title: 'Interstellar', year: 2014, genre: 'Sci-Fi', desc: 'A team of explorers travel through a wormhole in space in an attempt to ensure humanity\'s survival.' },
+  { id: 'm7', title: 'The Dark Knight', year: 2008, genre: 'Action', desc: 'Batman faces the Joker, a chaotic criminal who plunges Gotham into anarchy and forces the hero to confront his limits.' },
+  { id: 'm8', title: 'Fight Club', year: 1999, genre: 'Drama', desc: 'An insomniac office worker forms an underground fight club with a soap salesman, leading to a shocking revelation.' },
+  { id: 'm9', title: 'Pulp Fiction', year: 1994, genre: 'Crime', desc: 'The lives of two hitmen, a boxer, and a gangster\'s wife intertwine in a series of nonlinear storylines.' },
+  { id: 'm10', title: 'The Shawshank Redemption', year: 1994, genre: 'Drama', desc: 'A banker is wrongly convicted of murder and forms a friendship in prison while planning his escape.' },
+  { id: 'm11', title: 'Forrest Gump', year: 1994, genre: 'Drama', desc: 'A kind-hearted man with a low IQ witnesses and inadvertently influences major events of the 20th century.' },
+  { id: 'm12', title: 'Goodfellas', year: 1990, genre: 'Crime', desc: 'The story of Henry Hill and his life in the mob, covering his rise and fall in the criminal underworld.' },
+  { id: 'm13', title: 'The Godfather', year: 1972, genre: 'Crime', desc: 'The aging patriarch of an organized crime dynasty transfers control to his reluctant youngest son.' },
+  { id: 'm14', title: 'Parasite', year: 2019, genre: 'Thriller', desc: 'A poor family schemes to become employed by a wealthy family, leading to a series of unexpected and dark events.' },
+  { id: 'm15', title: 'Everything Everywhere All at Once', year: 2022, genre: 'Sci-Fi', desc: 'A middle-aged Chinese immigrant discovers she can access alternate universes and must save reality from chaos.' },
+  { id: 'm16', title: 'The Grand Budapest Hotel', year: 2014, genre: 'Comedy', desc: 'A legendary concierge at a famous hotel is framed for murder and must clear his name with the help of his protégé.' },
+  { id: 'm17', title: 'Spirited Away', year: 2001, genre: 'Animation', desc: 'A young girl enters a magical world of spirits and must work in a bathhouse to rescue her transformed parents.' },
+  { id: 'm18', title: 'Mad Max: Fury Road', year: 2015, genre: 'Action', desc: 'In a post-apocalyptic wasteline, a drifter helps a woman escape a warlord in a desperate race across the desert.' },
+  { id: 'm19', title: 'The Silence of the Lambs', year: 1991, genre: 'Thriller', desc: 'An FBI trainee seeks the help of a brilliant incarcerated cannibal to catch a serial killer.' },
+  { id: 'm20', title: 'Whiplash', year: 2014, genre: 'Drama', desc: 'A promising young drummer enrolls at a music conservatory where he is pushed to his limits by an abusive instructor.' },
+  { id: 'm21', title: 'Alien', year: 1979, genre: 'Horror', desc: 'The crew of a commercial spaceship encounters a deadly extraterrestrial creature that stalks them one by one.' },
+  { id: 'm22', title: 'Jurassic Park', year: 1993, genre: 'Adventure', desc: 'A theme park with cloned dinosaurs suffers a catastrophic power failure, freeing the prehistoric creatures.' },
+  { id: 'm23', title: 'Back to the Future', year: 1985, genre: 'Sci-Fi', desc: 'A teenager is accidentally sent 30 years back in time in a time-traveling DeLorean and must ensure his parents fall in love.' },
+  { id: 'm24', title: 'The Lion King', year: 1994, genre: 'Animation', desc: 'A young lion prince flees his kingdom after his father\'s death, only to return in adulthood to reclaim his throne.' },
+  { id: 'm25', title: 'Gladiator', year: 2000, genre: 'Action', desc: 'A betrayed Roman general becomes a gladiator and seeks vengeance against the corrupt emperor who murdered his family.' },
+];
+
+let db;
+let isReady = false;
+
+function populateSelect() {
+  const sel = $('movieSelect');
+  for (const m of MOVIES) {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = `${m.title} (${m.year})`;
+    sel.appendChild(opt);
+  }
+}
+
+async function getRecommendations(movieId) {
+  if (!isReady) return;
+
+  const movie = MOVIES.find(m => m.id === movieId);
+  if (!movie) return;
+
+  $('results').innerHTML = '<div class="empty">Searching for similar movies...</div>';
+
+  const hits = await db.queryText(movie.desc, { k: 10 });
+
+  // Filter out the selected movie itself
+  const similar = hits.filter(h => h.id !== movieId).slice(0, 9);
+
+  if (similar.length === 0) {
+    $('results').innerHTML = '<div class="empty">No similar movies found.</div>';
+    return;
+  }
+
+  $('results').innerHTML = similar.map(h => {
+    const m = MOVIES.find(mm => mm.id === h.id);
+    if (!m) return '';
+    const isSelected = m.id === movieId;
+    return `
+      <div class="movie ${isSelected ? 'selected' : ''}">
+        <h3>${m.title}</h3>
+        <div class="genre">${m.genre} · ${m.year}</div>
+        <div class="desc">${m.desc}</div>
+        <div class="score">Similarity: ${(h.score * 100).toFixed(1)}%</div>
+      </div>
+    `;
+  }).join('');
+
+  $('stats').textContent = `Showing similar movies to "${movie.title}" — ${db.count} movies indexed`;
+}
+
+async function buildIndex(useIVF) {
+  const stats = $('stats');
+  stats.textContent = 'Building movie index...';
+
+  if (db) db.destroy();
+
+  const embedder = hashingEmbedder({ dimension: 384 });
+  db = await BrowserVec.create({
+    dimension: 384,
+    metric: 'cosine',
+    embedder,
+    ann: useIVF ? {} : undefined,
+  });
+
+  await db.addTexts(MOVIES.map(m => ({
+    id: m.id,
+    text: `${m.title}. ${m.genre}. ${m.desc}`,
+    metadata: { title: m.title, genre: m.genre, year: m.year, desc: m.desc },
+  })));
+
+  stats.textContent = `${db.count} movies indexed using ${useIVF ? 'IVF' : 'flat'} index` + (useIVF ? ` (nlist=${db.stats().nlist})` : '');
+  isReady = true;
+}
+
+async function init() {
+  $('stats').textContent = 'Checking WebGPU...';
+  if (!BrowserVec.isSupported().webgpu) {
+    $('stats').textContent = 'WebGPU not available.';
+    return;
+  }
+
+  populateSelect();
+
+  await buildIndex(false);
+
+  $('movieSelect').onchange = () => {
+    $('recommendBtn').disabled = !$('movieSelect').value;
+  };
+
+  $('recommendBtn').onclick = () => getRecommendations($('movieSelect').value);
+
+  $('useIVF').onchange = async () => {
+    await buildIndex($('useIVF').checked);
+    if ($('movieSelect').value) getRecommendations($('movieSelect').value);
+  };
+
+  // Auto-recommend on first selection
+  $('movieSelect').onchange();
+}
+
+init();
+</script>
+</body>
+</html>
