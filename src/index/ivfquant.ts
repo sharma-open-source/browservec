@@ -26,6 +26,7 @@ import { tracedGpuWait } from '../engine/profile.js';
 import { topK, type FlatHit, type VectorIndex } from './flat.js';
 import { GpuTopK } from './gpuTopk.js';
 import type { IVFParams } from './ivf.js';
+import { chooseNprobe, pickTuneQueries, TUNE_K, TUNE_QUERIES } from './ivfTune.js';
 
 const WORKGROUP_SIZE = 64;
 
@@ -63,6 +64,8 @@ export class IVFQuantIndex implements VectorIndex {
   private listOffset: Int32Array | null = null;
   private builtRows = -1;
   private nprobeOverride: number | undefined;
+  private tunedNprobe: number | undefined; // auto-tuned default (see tune())
+  private tunedRecallEst: number | undefined; // estimated recall@k at tunedNprobe
 
   // Per-query scratch.
   private candidatesBuf: GPUBuffer | null = null;
@@ -150,6 +153,18 @@ export class IVFQuantIndex implements VectorIndex {
   }
   setNprobe(n: number | undefined): void {
     this.nprobeOverride = n;
+  }
+
+  /** Effective default nprobe (explicit > auto-tuned > 5% heuristic). 0 until built. */
+  get nprobe(): number {
+    if (this.nlistActual === 0) return 0;
+    const n = this.params.nprobe ?? this.tunedNprobe ?? Math.max(1, Math.round(this.nlistActual * 0.05));
+    return Math.max(1, Math.min(n, this.nlistActual));
+  }
+
+  /** Estimated recall@k at the auto-tuned nprobe (undefined unless targetRecall tuning ran). */
+  get tunedRecall(): number | undefined {
+    return this.tunedRecallEst;
   }
 
   private makePipeline(code: string, label: string): GPUComputePipeline {
@@ -289,6 +304,43 @@ export class IVFQuantIndex implements VectorIndex {
     this.listOffset = offset;
     this.listRows = listRows;
     this.builtRows = this.rows;
+
+    // Auto-tune nprobe against the recall target (an explicit nprobe wins).
+    if (this.params.targetRecall !== undefined && this.params.nprobe === undefined) {
+      await this.tune(clusters);
+    }
+  }
+
+  /**
+   * Estimate recall as a function of nprobe and pick the smallest one meeting
+   * `targetRecall` (see ivfTune.ts). Sample queries come from the reservoir —
+   * already rotated, so they feed the rotated search path directly. Ground
+   * truth is the full quantized scan (probe everything), which isolates the
+   * IVF-induced loss nprobe controls; quantization loss is handled by the
+   * caller's exact fp32 re-rank as usual.
+   */
+  private async tune(rowCluster: Uint32Array): Promise<void> {
+    const target = Math.min(1, Math.max(0, this.params.targetRecall!));
+    const k = Math.min(TUNE_K, this.rows - 1);
+    if (k < 1 || this.nlistActual <= 1) {
+      this.tunedNprobe = 1;
+      this.tunedRecallEst = 1;
+      return;
+    }
+    const pd = this.paddedDim;
+    const rank = new Int32Array(this.nlistActual);
+    const needed: number[] = [];
+    for (const si of pickTuneQueries(this.sampleFilled, TUNE_QUERIES)) {
+      const rq = this.sample.subarray(si * pd, si * pd + pd);
+      const gt = await this.search(rq, this.nlistActual, k + 1); // probe everything = exact
+      const order = this.pickProbes(rq, this.nlistActual);
+      for (let r = 0; r < order.length; r++) rank[order[r]!] = r;
+      // gt[0] is (almost always) the query row itself — skip it either way.
+      for (let h = 1; h < gt.length; h++) needed.push(rank[rowCluster[gt[h]!.row]!]!);
+    }
+    const { nprobe, recall } = chooseNprobe(needed, this.nlistActual, target);
+    this.tunedNprobe = nprobe;
+    this.tunedRecallEst = recall;
   }
 
   /** fp32 assignment over a rotated training buffer. */
@@ -410,7 +462,12 @@ export class IVFQuantIndex implements VectorIndex {
     if (this.builtRows !== this.rows) await this.build();
 
     const rq = this.encoder.rotateQuery(queryVec); // rotated fp32 query (asymmetric)
-    const probes = this.pickProbes(rq, this.resolveNprobe());
+    return this.search(rq, this.resolveNprobe(), k);
+  }
+
+  /** Probe → gather → GPU scan → top-k over a *rotated* query, at an explicit nprobe. */
+  private async search(rq: Float32Array, nprobe: number, k: number): Promise<FlatHit[]> {
+    const probes = this.pickProbes(rq, nprobe);
     const candidates = this.gatherCandidates(probes);
     const total = candidates.length;
     if (total === 0) return [];
@@ -430,8 +487,8 @@ export class IVFQuantIndex implements VectorIndex {
   }
 
   private resolveNprobe(): number {
-    const def = Math.max(1, Math.round(this.nlistActual * 0.05));
-    const n = this.nprobeOverride ?? this.params.nprobe ?? def;
+    const n = this.nprobeOverride ?? this.nprobe;
+    this.nprobeOverride = undefined; // per-query override, consumed once
     return Math.max(1, Math.min(n, this.nlistActual));
   }
 

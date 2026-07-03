@@ -719,6 +719,14 @@ export class BrowserVec {
       const nlist = (this.index as { nlist: number }).nlist;
       if (nlist > 0) out.nlist = nlist;
     }
+    if ('nprobe' in this.index) {
+      const nprobe = (this.index as { nprobe: number }).nprobe;
+      if (nprobe > 0) out.nprobe = nprobe;
+    }
+    if ('tunedRecall' in this.index) {
+      const recall = (this.index as { tunedRecall: number | undefined }).tunedRecall;
+      if (recall !== undefined) out.tunedRecall = recall;
+    }
     if ('maxLevel' in this.index) {
       const maxLevel = (this.index as { maxLevel: number }).maxLevel;
       if (maxLevel >= 0) out.maxLevel = maxLevel;
