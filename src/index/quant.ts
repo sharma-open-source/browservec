@@ -14,6 +14,7 @@ import { createQuantEncoder, type QuantEncoder, type IngestMode } from '../quant
 import { tracedGpuWait } from '../engine/profile.js';
 import { topK, type FlatHit } from './flat.js';
 import { GpuTopK } from './gpuTopk.js';
+import { ScoreMask, MASKED_SCORE } from './scoreMask.js';
 
 const WORKGROUP_SIZE = 64;
 
@@ -36,6 +37,7 @@ export class QuantIndex {
   private readback: GPUBuffer | null = null;
   private scoreCap = 0;
   private gpuTopk: GpuTopK | null = null;
+  private masker: ScoreMask | null = null;
   private readonly paramsScratch = new Uint32Array(4);
 
   constructor(
@@ -160,7 +162,24 @@ export class QuantIndex {
   }
 
   /** Approximate top-k by quantized score (rotates the query internally). */
-  async query(queryVec: Float32Array, k: number): Promise<FlatHit[]> {
+  query(queryVec: Float32Array, k: number): Promise<FlatHit[]> {
+    return this.search(queryVec, k, null);
+  }
+
+  /**
+   * Filtered query (FR-7): mask pass between the quantized distance dispatch
+   * and top-k stamps the sentinel over non-matching rows, so only matching rows
+   * reach the caller's exact re-rank. `maskWords` is 1 bit per global row.
+   */
+  queryMasked(queryVec: Float32Array, k: number, maskWords: Uint32Array): Promise<FlatHit[]> {
+    return this.search(queryVec, k, maskWords);
+  }
+
+  private async search(
+    queryVec: Float32Array,
+    k: number,
+    maskWords: Uint32Array | null,
+  ): Promise<FlatHit[]> {
     if (this.ctx.lost) throw new Error('GPU device lost; re-create the store');
     if (this.rows === 0) return [];
     const { device } = this.ctx;
@@ -195,6 +214,12 @@ export class QuantIndex {
       device.queue.submit([enc.finish()]);
     });
 
+    // Filtered query: stamp the sentinel over masked-out rows before top-k.
+    if (maskWords) {
+      this.masker ??= new ScoreMask(this.ctx);
+      this.masker.apply(sp.score, this.rows, maskWords);
+    }
+
     // On-GPU top-k once the corpus is large enough that the N-score readback
     // dominates (§14.2 lever 3). Scores are already dense-global (chunk offsets
     // applied in-shader), so the reduction is chunk-oblivious. Skipped when the
@@ -214,7 +239,9 @@ export class QuantIndex {
     const scores = new Float32Array(sp.readback.getMappedRange(0, this.rows * 4));
     const hits = topK(scores, this.rows, k);
     sp.readback.unmap();
-    return hits;
+    // Drop sentinel slots when k exceeds the matching-row count (the GPU
+    // reduction path drops them in its merge).
+    return maskWords ? hits.filter((h) => h.score > MASKED_SCORE) : hits;
   }
 
   destroy(): void {
@@ -226,5 +253,6 @@ export class QuantIndex {
     this.scoreBuf?.destroy();
     this.readback?.destroy();
     this.gpuTopk?.destroy();
+    this.masker?.destroy();
   }
 }

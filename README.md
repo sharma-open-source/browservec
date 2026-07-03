@@ -66,6 +66,9 @@ await db.addBatch([
 const hits = await db.query(queryVec, { k: 5 });
 // → [{ id, score, metadata? }, ...]  (higher score = closer)
 
+await db.query(queryVec, { k: 5, filter: { lang: 'en', year: { $gte: 2020 } } });
+// metadata pre-filtering: $eq (bare value), $ne, $in, $gt/$gte/$lt/$lte
+
 const batches = await db.queryBatch([q1, q2, q3], { k: 5 });
 // → QueryResult[][] — one GPU dispatch on an HNSW store with search: 'gpu'
 
@@ -85,6 +88,7 @@ Each links to a short guide with runnable code:
 
 | Feature | What it does |
 |---|---|
+| [Metadata filtering](./docs/api-reference.md#metadatafilter) | Mongo-ish `filter` on queries (`$eq`/`$ne`/`$in`/ranges). Flat stores filter **in-index on the GPU** via a score-mask kernel (exact top-k of matching rows, any selectivity, no over-fetch); tiny match sets take an exact CPU scan, exact on every index type. |
 | [Deleting vectors](./docs/features.md#deleting-vectors) | Tombstone-based delete/update/compact — cheap deletes, GPU memory reclaimed on compact or reload. |
 | [Persistence](./docs/features.md#persistence-m2) | Versioned binary snapshots to OPFS (or IndexedDB), auto-load on `create()`, export/import as a `Blob`. |
 | [Encryption at rest](./docs/features.md#encryption-at-rest-m6) | AES-256-GCM + PBKDF2 passphrase envelope for persisted/exported snapshots. |

@@ -8,6 +8,22 @@ the public API may still shift between minor versions).
 ## [Unreleased]
 
 ### Added
+- Metadata filtering (FR-7): `query()`/`queryText()`/`queryBatch()` accept a
+  Mongo-ish `filter` in `QueryOptions` — bare values for equality plus `$eq`,
+  `$ne`, `$in`, `$gt`/`$gte`/`$lt`/`$lte` (AND across fields; unknown operators
+  throw). Execution is selectivity-aware: tiny match sets (≤ ~4k rows) are
+  scored exactly on the CPU straight from the store's fp32 vectors (exact on
+  every index type); on flat stores (fp32 and quantized) larger filters run
+  **in-index on the GPU** — a new score-mask kernel (`engine/wgsl/mask.ts` +
+  `index/scoreMask.ts`) stamps non-matching rows to the `-FLT_MAX` sentinel
+  between the distance dispatch and top-k, so filtered queries return exactly
+  the top-k matching rows at full GPU speed with no over-fetch (mask = 1
+  bit/row). IVF/HNSW/CPU-fallback stores use the exact CPU scan when selective
+  and tombstone-style over-fetch + post-filter when the filter matches nearly
+  everything; masked IVF scans and filtered HNSW traversal are future work.
+  New public types: `MetadataFilter`, `FilterOps`, `FilterValue`. Validated in
+  headless Chrome on a real GPU (masked flat exact vs brute force on both
+  top-k paths, chunked corpora, int8 re-rank, tombstones, k > matches).
 - `stats()` now reports a per-query time breakdown: `lastQueryGpuMs` (measured
   wait on submitted GPU work + readback) and `lastQueryCpuMs` (JS-side prep,
   candidate gather, re-rank, top-k merge). 0/total respectively on the CPU

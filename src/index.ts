@@ -33,6 +33,7 @@ import { IVFIndex } from './index/ivf.js';
 import { IVFQuantIndex } from './index/ivfquant.js';
 import { HNSWIndex } from './index/hnsw.js';
 import { Store, normalizeInPlace } from './store/store.js';
+import { compileFilter } from './store/filter.js';
 import { queryTrace } from './engine/profile.js';
 import { selectBackend, type PersistenceBackend } from './persist/backend.js';
 import { serialize, deserialize, type Snapshot } from './persist/format.js';
@@ -50,6 +51,9 @@ export type {
   Embedder,
   TextRecord,
   Metric,
+  MetadataFilter,
+  FilterOps,
+  FilterValue,
   QueryOptions,
   QueryResult,
   Stats,
@@ -65,6 +69,15 @@ export { transformersEmbedder } from './embed/transformers.js';
 export type { TransformersEmbedderOptions } from './embed/transformers.js';
 
 const DEFAULT_SEED = 0x9e3779b9;
+
+// Filtered queries with at most this many matching rows skip the GPU entirely:
+// an exact CPU scan over so few rows is microseconds, cheaper than any dispatch
+// + readback round-trip (mirrors GPU_TOPK_MIN_ROWS in spirit).
+const FILTER_CPU_SCAN_MAX = 4096;
+
+interface MaskCapableIndex {
+  queryMasked(q: Float32Array, k: number, maskWords: Uint32Array): Promise<FlatHit[]>;
+}
 
 // Decrypt a persisted/imported blob when it's an encrypted envelope. An encrypted
 // blob without a passphrase, or a passphrase against a plaintext blob, is a clear
@@ -344,12 +357,56 @@ export class BrowserVec {
       (this.index as { setEf(n: number): void }).setEf(opts.efSearch);
     }
 
+    // Metadata filtering (FR-7). Pre-scan the metadata to find matching rows,
+    // then pick a strategy:
+    //  - tiny match set → skip the index and exactly score just the matching
+    //    rows on the CPU (the store keeps the fp32 vectors). Exact on every
+    //    index type, including approximate ones.
+    //  - mask-capable index (flat fp32/quant) → in-index pre-filter: a mask
+    //    pass stamps non-matching rows' scores to -FLT_MAX between the distance
+    //    kernel and top-k, so the GPU returns exactly the top-k matching rows
+    //    at full speed, any selectivity, no over-fetch.
+    //  - other indexes (IVF/HNSW/CPU fallback) → selective filters take the
+    //    exact CPU scan; near-total matches stay on the index path and
+    //    over-fetch by the excluded count, post-filtering (tombstone trick).
+    const predicate = opts.filter ? compileFilter(opts.filter) : null;
+    let skipRows = 0; // live rows the filter excludes (over-fetch path only)
+    let maskWords: Uint32Array | null = null;
+    if (predicate) {
+      const rowCount = this.store.rowCount;
+      const words = new Uint32Array(Math.ceil(rowCount / 32) || 1);
+      const matchRows: number[] = [];
+      for (let row = 0; row < rowCount; row++) {
+        if (this.store.isDeleted(row)) continue;
+        const entry = this.store.entryByRow(row)!;
+        if (predicate(entry.metadata)) {
+          matchRows.push(row);
+          words[row >> 5]! |= 1 << (row & 31);
+        }
+      }
+      if (matchRows.length === 0) return [];
+      if (matchRows.length <= FILTER_CPU_SCAN_MAX) return this.queryRowsExact(q, matchRows, k);
+      if ('queryMasked' in this.index) {
+        maskWords = words; // tombstones never match, so the mask excludes them too
+      } else {
+        skipRows = this.store.count - matchRows.length;
+        if (skipRows > Math.max(2 * k, 256)) return this.queryRowsExact(q, matchRows, k);
+      }
+    }
+
     // Deleted rows are tombstones still scored by the GPU, so over-fetch by the
-    // deleted count and filter them out — guarantees ≥k live results survive.
-    // When nothing is deleted, kEff == k and this is a no-op (unchanged path).
+    // deleted count (plus any filter-excluded live rows) and filter them out —
+    // guarantees ≥k qualifying results survive. When nothing is deleted and no
+    // filter is set, kEff == k and this is a no-op (unchanged path). The masked
+    // path needs no over-fetch at all: excluded rows can't win a top-k slot.
     const deleted = this.store.deletedCount;
     const total = this.index.size;
-    const kEff = Math.min(total, k + deleted);
+    const kEff = maskWords ? Math.min(total, k) : Math.min(total, k + deleted + skipRows);
+
+    const search = (kk: number): Promise<FlatHit[]> =>
+      maskWords
+        ? (this.index as unknown as MaskCapableIndex).queryMasked(q, kk, maskWords)
+        : this.index.query(q, kk);
 
     queryTrace.reset();
     const start = performance.now();
@@ -357,10 +414,10 @@ export class BrowserVec {
     if (this.quantBits > 0) {
       const doRerank = opts.rerank ?? this.rerankFactor > 1;
       const fetch = doRerank ? Math.min(total, Math.max(kEff, kEff * this.rerankFactor)) : kEff;
-      const approx = await this.index.query(q, fetch);
+      const approx = await search(fetch);
       hits = doRerank ? this.rerankExact(q, approx, kEff) : approx.slice(0, kEff);
     } else {
-      hits = await this.index.query(q, kEff);
+      hits = await search(kEff);
     }
     this.lastQueryMs = performance.now() - start;
     this.lastQueryGpuMs = queryTrace.gpuWaitMs;
@@ -369,12 +426,41 @@ export class BrowserVec {
     for (const h of hits) {
       if (deleted && this.store.isDeleted(h.row)) continue;
       const entry = this.store.entryByRow(h.row)!;
+      if (predicate && !predicate(entry.metadata)) continue;
       const out: QueryResult = { id: entry.id, score: h.score };
       if (entry.metadata !== undefined) out.metadata = entry.metadata;
       results.push(out);
       if (results.length === k) break;
     }
     return results;
+  }
+
+  /**
+   * Exact filtered search: score only the pre-filtered `rows` straight from the
+   * store's CPU-side fp32 buffer and keep the top-k. Cost is O(matches · dim),
+   * independent of corpus size — the win of a selective filter. Exact for every
+   * index configuration (quantized/IVF/HNSW included) since it bypasses the
+   * index entirely.
+   */
+  private queryRowsExact(q: Float32Array, rows: number[], k: number): QueryResult[] {
+    queryTrace.reset();
+    const start = performance.now();
+    const scores = new Float32Array(rows.length);
+    if (this.store.metric === 'l2') {
+      for (let i = 0; i < rows.length; i++) scores[i] = this.store.l2Row(rows[i]!, q);
+    } else {
+      for (let i = 0; i < rows.length; i++) scores[i] = this.store.dotRow(rows[i]!, q);
+    }
+    const hits = topK(scores, rows.length, k);
+    this.lastQueryMs = performance.now() - start;
+    this.lastQueryGpuMs = 0;
+
+    return hits.map((h) => {
+      const entry = this.store.entryByRow(rows[h.row]!)!;
+      const out: QueryResult = { id: entry.id, score: h.score };
+      if (entry.metadata !== undefined) out.metadata = entry.metadata;
+      return out;
+    });
   }
 
   /**
@@ -386,7 +472,9 @@ export class BrowserVec {
    */
   async queryBatch(queries: Vector[], opts: QueryOptions = {}): Promise<QueryResult[][]> {
     if (queries.length === 0) return [];
-    if (!('queryBatch' in this.index)) {
+    // Filtered batches go through query() per vector: the filter machinery
+    // (selectivity choice, exact scan, over-fetch) lives there.
+    if (!('queryBatch' in this.index) || opts.filter) {
       const out: QueryResult[][] = [];
       for (const q of queries) out.push(await this.query(q, opts));
       return out;

@@ -94,7 +94,38 @@ A discriminated union on `type`. Omitting `type` (or `'ivf'`) selects IVF, so pr
 
 ### `QueryOptions`
 
-`k` (default `10`), `rerank` (override the store's default re-rank behavior, quantized stores only), `nprobe` (per-query override, IVF stores only), `efSearch` (per-query beam-width override, HNSW stores only — higher = better recall, slower).
+`k` (default `10`), `filter` (metadata predicate — see [`MetadataFilter`](#metadatafilter)), `rerank` (override the store's default re-rank behavior, quantized stores only), `nprobe` (per-query override, IVF stores only), `efSearch` (per-query beam-width override, HNSW stores only — higher = better recall, slower).
+
+### `MetadataFilter`
+
+Mongo-ish predicate over record metadata (FR-7). Fields AND together; a bare
+value is shorthand for `{ $eq: value }`:
+
+```ts
+await db.query(q, { k: 8, filter: { lang: 'en', year: { $gte: 2020, $lt: 2025 } } });
+```
+
+Operators: `$eq`, `$ne` (also matches records missing the field), `$in` (array
+of values), and numeric `$gt` / `$gte` / `$lt` / `$lte` (only match stored
+numbers). Unknown operators throw.
+
+Execution picks a strategy per query:
+
+- **Tiny match set (≤ ~4k rows)** — bypasses the index: matching rows are scored
+  exactly against the store's CPU-side fp32 vectors (`O(matches · dim)`,
+  independent of corpus size). Exact on *every* index type, including
+  quantized/IVF/HNSW.
+- **Flat stores (fp32 or quantized), larger match sets** — **in-index GPU
+  filtering**: a mask pass stamps non-matching rows' scores to `-FLT_MAX`
+  between the distance kernel and the top-k reduction, so the GPU returns
+  exactly the top-k *matching* rows with no over-fetch. Full GPU speed at any
+  selectivity; exact for fp32, and quantized stores keep their usual exact
+  re-rank. Mask upload is 1 bit/row (~125 KB per query at 1M rows).
+- **IVF/HNSW/CPU-fallback stores, larger match sets** — selective filters take
+  the exact CPU scan; filters matching nearly everything stay on the index
+  path, over-fetching by the excluded count and post-filtering (the tombstone
+  mechanism). In-index filtering for IVF and HNSW (masked cluster scans /
+  filtered graph traversal) is future work.
 
 ## Result / status types
 

@@ -175,9 +175,45 @@ export interface QueryResult {
   metadata?: Metadata;
 }
 
+/** A metadata value usable in filters (matches the Metadata value type). */
+export type FilterValue = string | number | boolean | null;
+
+/** Per-field operators for {@link MetadataFilter}. Multiple operators AND together. */
+export interface FilterOps {
+  /** Field equals the value (strict ===). */
+  $eq?: FilterValue;
+  /** Field differs from the value; also matches records missing the field. */
+  $ne?: FilterValue;
+  /** Field equals any of the listed values. */
+  $in?: FilterValue[];
+  /** Numeric comparisons — only match when the stored value is a number. */
+  $gt?: number;
+  $gte?: number;
+  $lt?: number;
+  $lte?: number;
+}
+
+/**
+ * Mongo-ish metadata predicate (FR-7): fields AND together, a bare value is
+ * shorthand for `{ $eq: value }`. Example:
+ * `{ lang: 'en', year: { $gte: 2020 }, tag: { $in: ['a', 'b'] } }`.
+ */
+export type MetadataFilter = Record<string, FilterValue | FilterOps>;
+
 export interface QueryOptions {
   /** Number of neighbors to return. Default 10. */
   k?: number;
+  /**
+   * Only return records whose metadata matches this predicate. Tiny match sets
+   * (≤ ~4k rows) run as an exact CPU scan over just the matching rows — exact
+   * on every index type. On flat stores (fp32 or quantized) larger filters run
+   * in-index on the GPU: a mask pass excludes non-matching rows between the
+   * distance kernel and top-k, so filtered queries keep full GPU speed at any
+   * selectivity (exact for fp32; quantized keeps its usual re-rank recall).
+   * IVF/HNSW/CPU-fallback stores fall back to the exact CPU scan for selective
+   * filters and index-with-over-fetch for near-total matches.
+   */
+  filter?: MetadataFilter;
   /**
    * Override exact re-rank for this query (quantized stores only). Defaults to
    * the store's configured behavior. Has no effect on fp32 stores.
