@@ -233,6 +233,79 @@ describe.skipIf(!hasGpu)('IVF index', () => {
       // Scanning every cluster must be exact; nprobe=1 strictly can't beat it.
       expect(high / queries.length).toBeGreaterThanOrEqual(0.99);
       expect(low / queries.length).toBeLessThanOrEqual(high / queries.length);
+      // The override is per-query: the configured default (1) must survive it.
+      expect(db.stats().nprobe).toBe(1);
+    } finally {
+      db.destroy();
+    }
+  });
+
+  it('targetRecall auto-tunes nprobe and delivers the target on real queries', async () => {
+    const dim = 32;
+    const target = 0.95;
+    const vectors = randomVectors(3000, dim, 44);
+    const db = await BrowserVec.create({
+      dimension: dim,
+      ann: { type: 'ivf', nlist: 48, targetRecall: target, seed: 3 },
+    });
+    try {
+      await db.addBatch(records(vectors));
+      let total = 0;
+      const queries = randomVectors(20, dim, 45);
+      for (const q of queries) {
+        total += recall(await db.query(q, { k: 10 }), bruteForce(vectors, q, 10, 'cosine', true));
+      }
+      const stats = db.stats();
+      // Tuning ran: a concrete nprobe was chosen and its estimate meets the target.
+      expect(stats.nprobe).toBeGreaterThanOrEqual(1);
+      expect(stats.nprobe).toBeLessThanOrEqual(48);
+      expect(stats.tunedRecall).toBeGreaterThanOrEqual(target);
+      // Estimated on sampled corpus queries; allow slack on independent ones.
+      expect(total / queries.length).toBeGreaterThanOrEqual(target - 0.1);
+    } finally {
+      db.destroy();
+    }
+  });
+
+  it('auto-tuning also drives the IVF×quant combo', async () => {
+    const dim = 32;
+    const target = 0.9;
+    const vectors = randomVectors(3000, dim, 46);
+    const db = await BrowserVec.create({
+      dimension: dim,
+      quantBits: 8,
+      ann: { type: 'ivf', nlist: 48, targetRecall: target, seed: 4 },
+    });
+    try {
+      await db.addBatch(records(vectors));
+      let total = 0;
+      const queries = randomVectors(20, dim, 47);
+      for (const q of queries) {
+        total += recall(await db.query(q, { k: 10 }), bruteForce(vectors, q, 10, 'cosine', true));
+      }
+      const stats = db.stats();
+      expect(stats.nprobe).toBeGreaterThanOrEqual(1);
+      expect(stats.tunedRecall).toBeGreaterThanOrEqual(target);
+      // int8 adds its own (re-ranked) loss on top of the tuned IVF loss.
+      expect(total / queries.length).toBeGreaterThanOrEqual(target - 0.15);
+    } finally {
+      db.destroy();
+    }
+  });
+
+  it('an explicit nprobe disables auto-tuning', async () => {
+    const dim = 16;
+    const vectors = randomVectors(500, dim, 48);
+    const db = await BrowserVec.create({
+      dimension: dim,
+      ann: { type: 'ivf', nlist: 16, nprobe: 4, targetRecall: 0.99, seed: 5 },
+    });
+    try {
+      await db.addBatch(records(vectors));
+      await db.query(randomVectors(1, dim, 49)[0]!, { k: 5 });
+      const stats = db.stats();
+      expect(stats.nprobe).toBe(4);
+      expect(stats.tunedRecall).toBeUndefined();
     } finally {
       db.destroy();
     }

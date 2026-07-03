@@ -67,8 +67,21 @@ export interface IVFConfig {
   type?: 'ivf';
   /** Number of clusters. Default ≈ sqrt(count), clamped to [16, 4096]. */
   nlist?: number;
-  /** Clusters scanned per query. Default ≈ 5% of nlist. Higher = better recall, slower. */
+  /**
+   * Clusters scanned per query. Higher = better recall, slower. Default: the
+   * auto-tuned value when `targetRecall` is set, else ≈ 5% of nlist. Setting
+   * this explicitly disables auto-tuning.
+   */
   nprobe?: number;
+  /**
+   * Auto-tune nprobe instead of picking it by hand: after each index build the
+   * store estimates recall@10 on sample queries drawn from your own data (one
+   * exact scan per query, ≤ 32 queries) and adopts the smallest nprobe whose
+   * estimated recall meets this target (0–1, e.g. 0.95). The chosen value and
+   * its estimated recall surface as stats().nprobe / stats().tunedRecall.
+   * Ignored when `nprobe` is set explicitly.
+   */
+  targetRecall?: number;
   /** Reservoir sample size used to train k-means. Default 50_000. */
   sampleSize?: number;
   /** Lloyd iterations during build. Default 12. */
@@ -261,6 +274,10 @@ export interface Stats {
   quantBits: 0 | 1 | 4 | 8;
   /** IVF cluster count, if an IVF index is in use and built. */
   nlist?: number;
+  /** IVF default clusters-per-query (explicit, auto-tuned, or the 5% heuristic), once built. */
+  nprobe?: number;
+  /** Estimated recall@10 at the auto-tuned nprobe (only when `targetRecall` tuning ran). */
+  tunedRecall?: number;
   /** HNSW top graph layer, if an HNSW index is in use and non-empty. */
   maxLevel?: number;
   /** HNSW query engine: 'gpu' (beam-search kernel) or 'cpu' (graph walk). */

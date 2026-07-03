@@ -193,6 +193,32 @@ Real embeddings cluster well, so recall@10 ≥ 0.95 is reachable at a small
 
 > **Try it:** [`examples/03-ivf-index.html`](../examples/03-ivf-index.html)
 
+**Auto-tuning (`targetRecall`).** Rather than hand-picking `nprobe`, state the
+recall you want:
+
+```ts
+const db = await BrowserVec.create({
+  dimension: 768,
+  metric: 'cosine',
+  ann: { targetRecall: 0.95 },  // auto-tune nprobe to ≈95% recall@10
+});
+```
+
+After each k-means build the index estimates recall on ≤ 32 sample queries drawn
+from the corpus itself and adopts the smallest `nprobe` whose estimated recall
+meets the target. One exact scan per sample query prices *every* candidate
+`nprobe` at once: a true neighbour is found at `nprobe = p` exactly when its
+cluster ranks among the query's `p` nearest centroids, so recall-vs-nprobe falls
+out of a histogram of those ranks — no per-`nprobe` re-querying. Easy corpora
+get a faster index, hard ones a more thorough one. The choice surfaces as
+`stats().nprobe` and `stats().tunedRecall`; an explicit `nprobe` disables
+tuning, and per-query `{ nprobe }` overrides still apply. Works on fp32 IVF and
+the IVF × quant combo (there the tuner measures the clustering loss in the
+quantized space the index scans; quantization loss itself is still covered by
+the exact fp32 re-rank). Tuning cost: ≤ 32 exact GPU scans per rebuild.
+
+> **Try it:** [`examples/20-ivf-autotune.html`](../examples/20-ivf-autotune.html)
+
 **IVF × int8 (the 1M path).** Add `quantBits: 8` to an `ann` store and the corpus
 is both clustered *and* int8-quantized — so ~1M×768 fits in a single ~1 GB buffer
 *and* each query scans only the probed lists:

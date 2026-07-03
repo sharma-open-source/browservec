@@ -80,7 +80,7 @@ linked from each entry below.
 
 A discriminated union on `type`. Omitting `type` (or `'ivf'`) selects IVF, so pre-M7 configs are unchanged.
 
-**`IVFConfig`** — `type?: 'ivf'`, `nlist` (default ≈ `sqrt(count)`, clamped `[16, 4096]`), `nprobe` (default ≈ 5% of `nlist`), `sampleSize` (default `50_000`, reservoir sample for k-means training), `iters` (default `8` Lloyd iterations), `seed`.
+**`IVFConfig`** — `type?: 'ivf'`, `nlist` (default ≈ `sqrt(count)`, clamped `[16, 4096]`), `nprobe` (default: the auto-tuned value when `targetRecall` is set, else ≈ 5% of `nlist`; setting it explicitly disables auto-tuning), `targetRecall` (0–1, e.g. `0.95` — auto-tune `nprobe`: after each build, recall@10 is estimated on ≤ 32 sample queries drawn from the corpus, one exact scan each, and the smallest `nprobe` meeting the target becomes the default; the result surfaces as `stats().nprobe` / `stats().tunedRecall`), `sampleSize` (default `50_000`, reservoir sample for k-means training), `iters` (default `8` Lloyd iterations), `seed`.
 
 **`HNSWConfig`** — `type: 'hnsw'`, `M` (graph out-degree per layer, layer 0 keeps 2·M; default `16`), `efConstruction` (build beam width; default `200`), `efSearch` (query beam width, clamped ≥ k; default `64`), `seed` (level RNG, reproducible builds), `search` (`'cpu' | 'gpu'`, default `'cpu'` — `'gpu'` runs the single-dispatch beam-search kernel; needs WebGPU, `M ≤ 32`, `efSearch ≤ 256`, corpus within one storage buffer, and shines on `queryBatch`).
 
@@ -135,7 +135,7 @@ Execution picks a strategy per query:
 
 ### `Stats` (from `stats()`)
 
-`count`, `deleted?`, `dimension`, `metric`, `device: 'webgpu' | 'wasm'`, `lastQueryMs?`, `lastQueryGpuMs?` (GPU kernel portion), `lastQueryCpuMs?` (CPU re-rank/filtering portion), `persist?: 'opfs' | 'indexeddb'`, `quantBits`, `nlist?` (IVF cluster count once built), `maxLevel?` (HNSW top graph layer once non-empty), `graphSearch?: 'gpu' | 'cpu'` (which engine answers HNSW queries), `chunks?` (>1 once the corpus spans multiple GPU buffers), `ingest?: 'worker' | 'main-thread'` (where quantized rotate+quantize ran), `train?: 'worker' | 'main-thread'` (where the ANN index build ran — IVF k-means updates, or HNSW graph construction).
+`count`, `deleted?`, `dimension`, `metric`, `device: 'webgpu' | 'wasm'`, `lastQueryMs?`, `lastQueryGpuMs?` (GPU kernel portion), `lastQueryCpuMs?` (CPU re-rank/filtering portion), `persist?: 'opfs' | 'indexeddb'`, `quantBits`, `nlist?` (IVF cluster count once built), `nprobe?` (IVF default clusters-per-query — explicit, auto-tuned, or the 5% heuristic — once built), `tunedRecall?` (estimated recall@10 at the auto-tuned `nprobe`; only present when `targetRecall` tuning ran), `maxLevel?` (HNSW top graph layer once non-empty), `graphSearch?: 'gpu' | 'cpu'` (which engine answers HNSW queries), `chunks?` (>1 once the corpus spans multiple GPU buffers), `ingest?: 'worker' | 'main-thread'` (where quantized rotate+quantize ran), `train?: 'worker' | 'main-thread'` (where the ANN index build ran — IVF k-means updates, or HNSW graph construction).
 
 ### `SupportInfo` (from `isSupported()`)
 

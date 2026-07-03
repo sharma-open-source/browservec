@@ -8,6 +8,17 @@ the public API may still shift between minor versions).
 ## [Unreleased]
 
 ### Added
+- IVF auto-tuning: `ann: { targetRecall: 0.95 }` replaces hand-picking
+  `nprobe`. After each k-means build the index estimates recall@10 on ≤ 32
+  sample queries drawn from the corpus (one exact scan each) and adopts the
+  smallest `nprobe` whose estimated recall meets the target — one scan per
+  query prices every candidate `nprobe` at once via the rank of each true
+  neighbour's cluster (`src/index/ivfTune.ts`). Works on fp32 IVF and the
+  IVF × quant combo (tuned in the quantized space the index scans; the exact
+  fp32 re-rank still covers quantization loss). An explicit `nprobe` disables
+  tuning; per-query `{ nprobe }` overrides still apply. `stats()` now reports
+  `nprobe` (the effective default) and `tunedRecall` (the tuner's estimate).
+  New example: `examples/20-ivf-autotune.html`.
 - Metadata filtering (FR-7): `query()`/`queryText()`/`queryBatch()` accept a
   Mongo-ish `filter` in `QueryOptions` — bare values for equality plus `$eq`,
   `$ne`, `$in`, `$gt`/`$gte`/`$lt`/`$lte` (AND across fields; unknown operators
@@ -49,6 +60,9 @@ the public API may still shift between minor versions).
   benchmarks can't drift apart on what "GPU time" or "recall" means.
 
 ### Fixed
+- A per-query `{ nprobe }` override is now truly consumed by that query alone;
+  previously it silently stuck as the default for all subsequent queries on
+  the same IVF store.
 - `transformersEmbedder()` now sets `env.allowLocalModels = false` before
   loading a model. transformers.js defaults this to `true` and probes a local
   `/models/...` path first; since this library never ships local model files,

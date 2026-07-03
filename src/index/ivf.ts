@@ -22,6 +22,7 @@ import { tracedGpuWait } from '../engine/profile.js';
 import { topK, type FlatHit, type VectorIndex } from './flat.js';
 import { GpuTopK } from './gpuTopk.js';
 import { mulberry32 } from '../quant/prng.js';
+import { chooseNprobe, pickTuneQueries, TUNE_K, TUNE_QUERIES } from './ivfTune.js';
 
 const WORKGROUP_SIZE = 64;
 
@@ -30,6 +31,13 @@ export interface IVFParams {
   nlist?: number;
   /** Clusters scanned per query. Default ≈ 5% of nlist (min 1). */
   nprobe?: number;
+  /**
+   * Auto-tune nprobe to hit this recall@10 (0–1, e.g. 0.95). After each build,
+   * recall is estimated on sample queries drawn from the corpus and the
+   * smallest nprobe meeting the target becomes the default. Ignored when an
+   * explicit `nprobe` is set.
+   */
+  targetRecall?: number;
   /** Reservoir sample size kept for training. Default 50_000. */
   sampleSize?: number;
   /** Max points actually fed to k-means per iteration (GPU-assigned). Default 16_384. */
@@ -50,6 +58,8 @@ export class IVFIndex implements VectorIndex {
   private rows = 0;
   private builtRows = -1; // rows count at last build (-1 = never built)
   private nprobeOverride: number | undefined; // per-query override (see setNprobe)
+  private tunedNprobe: number | undefined; // auto-tuned default (see tune())
+  private tunedRecallEst: number | undefined; // estimated recall@k at tunedNprobe
 
   // Reservoir sample (CPU) for k-means; bounded so ingest stays memory-light.
   private readonly sampleCap: number;
@@ -127,6 +137,18 @@ export class IVFIndex implements VectorIndex {
   /** Set the nprobe used by the next query() (consumed once). */
   setNprobe(n: number | undefined): void {
     this.nprobeOverride = n;
+  }
+
+  /** Effective default nprobe (explicit > auto-tuned > 5% heuristic). 0 until built. */
+  get nprobe(): number {
+    if (this.nlistActual === 0) return 0;
+    const n = this.params.nprobe ?? this.tunedNprobe ?? Math.max(1, Math.round(this.nlistActual * 0.05));
+    return Math.max(1, Math.min(n, this.nlistActual));
+  }
+
+  /** Estimated recall@k at the auto-tuned nprobe (undefined unless targetRecall tuning ran). */
+  get tunedRecall(): number | undefined {
+    return this.tunedRecallEst;
   }
 
   private makePipeline(code: string, label: string): GPUComputePipeline {
@@ -229,6 +251,43 @@ export class IVFIndex implements VectorIndex {
     this.listOffset = offset;
     this.listRows = listRows;
     this.builtRows = this.rows;
+
+    // Auto-tune nprobe against the recall target (an explicit nprobe wins).
+    if (this.params.targetRecall !== undefined && this.params.nprobe === undefined) {
+      await this.tune(clusters);
+    }
+  }
+
+  /**
+   * Estimate recall as a function of nprobe and pick the smallest one meeting
+   * `targetRecall` (see ivfTune.ts for why one exact scan per sample query
+   * covers every nprobe at once). Queries are drawn from the reservoir sample —
+   * real corpus rows — and the trivial self-hit is dropped from the ground
+   * truth so it doesn't inflate recall. Cost: ≤ TUNE_QUERIES exact scans per
+   * build, on the GPU path the index already uses.
+   */
+  private async tune(rowCluster: Uint32Array): Promise<void> {
+    const target = Math.min(1, Math.max(0, this.params.targetRecall!));
+    const k = Math.min(TUNE_K, this.rows - 1);
+    if (k < 1 || this.nlistActual <= 1) {
+      this.tunedNprobe = 1;
+      this.tunedRecallEst = 1;
+      return;
+    }
+    const dim = this.dim;
+    const rank = new Int32Array(this.nlistActual);
+    const needed: number[] = [];
+    for (const si of pickTuneQueries(this.sampleFilled, TUNE_QUERIES)) {
+      const q = this.sample.subarray(si * dim, si * dim + dim);
+      const gt = await this.search(q, this.nlistActual, k + 1); // probe everything = exact
+      const order = this.pickProbes(q, this.nlistActual);
+      for (let r = 0; r < order.length; r++) rank[order[r]!] = r;
+      // gt[0] is the query row itself (a corpus row) — skip it.
+      for (let h = 1; h < gt.length; h++) needed.push(rank[rowCluster[gt[h]!.row]!]!);
+    }
+    const { nprobe, recall } = chooseNprobe(needed, this.nlistActual, target);
+    this.tunedNprobe = nprobe;
+    this.tunedRecallEst = recall;
   }
 
   /**
@@ -297,8 +356,11 @@ export class IVFIndex implements VectorIndex {
     if (this.ctx.lost) throw new Error('GPU device lost; re-create the store');
     if (this.rows === 0) return [];
     if (this.builtRows !== this.rows) await this.build();
+    return this.search(queryVec, this.resolveNprobe(), k);
+  }
 
-    const nprobe = this.resolveNprobe();
+  /** Probe → gather → GPU scan → top-k, at an explicit nprobe (index must be built). */
+  private async search(queryVec: Float32Array, nprobe: number, k: number): Promise<FlatHit[]> {
     const probes = this.pickProbes(queryVec, nprobe);
     const candidates = this.gatherCandidates(probes);
     const n = candidates.length;
@@ -320,8 +382,8 @@ export class IVFIndex implements VectorIndex {
   }
 
   private resolveNprobe(): number {
-    const def = Math.max(1, Math.round(this.nlistActual * 0.05));
-    const n = this.nprobeOverride ?? this.params.nprobe ?? def;
+    const n = this.nprobeOverride ?? this.nprobe;
+    this.nprobeOverride = undefined; // per-query override, consumed once
     return Math.max(1, Math.min(n, this.nlistActual));
   }
 
