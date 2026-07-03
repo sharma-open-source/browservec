@@ -129,6 +129,36 @@ export class Store {
     return acc;
   }
 
+  /**
+   * Negative squared L2 distance of stored row `row` against `q` — same
+   * "higher = closer" convention as the GPU/CPU l2 kernels. Used by the exact
+   * filtered-scan path. Unrolled ×4 like {@link dotRow}.
+   */
+  l2Row(row: number, q: Float32Array): number {
+    const dim = this.dimension;
+    const raw = this.raw;
+    const base = row * dim;
+    const vec = dim & ~3;
+    let a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+    let i = 0;
+    for (; i < vec; i += 4) {
+      const d0 = raw[base + i]! - q[i]!;
+      const d1 = raw[base + i + 1]! - q[i + 1]!;
+      const d2 = raw[base + i + 2]! - q[i + 2]!;
+      const d3 = raw[base + i + 3]! - q[i + 3]!;
+      a0 += d0 * d0;
+      a1 += d1 * d1;
+      a2 += d2 * d2;
+      a3 += d3 * d3;
+    }
+    let acc = a0 + a1 + a2 + a3;
+    for (; i < dim; i++) {
+      const d = raw[base + i]! - q[i]!;
+      acc += d * d;
+    }
+    return -acc;
+  }
+
   /** Validate length and (optionally) L2-normalize, returning a fresh Float32Array. */
   prepare(vector: Vector): Float32Array {
     const v = vector instanceof Float32Array ? new Float32Array(vector) : Float32Array.from(vector);

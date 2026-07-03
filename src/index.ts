@@ -31,7 +31,9 @@ import { CpuIndex } from './fallback/cpu.js';
 import { QuantIndex } from './index/quant.js';
 import { IVFIndex } from './index/ivf.js';
 import { IVFQuantIndex } from './index/ivfquant.js';
+import { HNSWIndex } from './index/hnsw.js';
 import { Store, normalizeInPlace } from './store/store.js';
+import { compileFilter } from './store/filter.js';
 import { queryTrace } from './engine/profile.js';
 import { selectBackend, type PersistenceBackend } from './persist/backend.js';
 import { serialize, deserialize, type Snapshot } from './persist/format.js';
@@ -44,9 +46,14 @@ export type {
   ExportOptions,
   QuantConfig,
   ANNConfig,
+  IVFConfig,
+  HNSWConfig,
   Embedder,
   TextRecord,
   Metric,
+  MetadataFilter,
+  FilterOps,
+  FilterValue,
   QueryOptions,
   QueryResult,
   Stats,
@@ -62,6 +69,15 @@ export { transformersEmbedder } from './embed/transformers.js';
 export type { TransformersEmbedderOptions } from './embed/transformers.js';
 
 const DEFAULT_SEED = 0x9e3779b9;
+
+// Filtered queries with at most this many matching rows skip the GPU entirely:
+// an exact CPU scan over so few rows is microseconds, cheaper than any dispatch
+// + readback round-trip (mirrors GPU_TOPK_MIN_ROWS in spirit).
+const FILTER_CPU_SCAN_MAX = 4096;
+
+interface MaskCapableIndex {
+  queryMasked(q: Float32Array, k: number, maskWords: Uint32Array): Promise<FlatHit[]>;
+}
 
 // Decrypt a persisted/imported blob when it's an encrypted envelope. An encrypted
 // blob without a passphrase, or a passphrase against a plaintext blob, is a clear
@@ -97,6 +113,14 @@ function buildIndex(
 ): VectorIndex {
   const seed = quant?.seed ?? DEFAULT_SEED;
   const rounds = quant?.rounds ?? 2;
+  // HNSW is CPU-resident (graph traversal doesn't batch onto the GPU) and metric-
+  // complete; it's the one index shared verbatim with the no-GPU fallback path.
+  if (ann?.type === 'hnsw') {
+    if (quantBits !== 0) {
+      throw new Error('HNSW currently supports fp32 only (quantBits: 0) — HNSW × quant is later work');
+    }
+    return new HNSWIndex(dim, metric, ann, ctx);
+  }
   if (ann) {
     if (metric === 'l2') {
       throw new Error('IVF supports metric cosine/dot only (l2 is later work)');
@@ -117,14 +141,18 @@ function buildIndex(
   throw new Error(`quantBits ${quantBits} not supported (ships 0, 1, 4, 8)`);
 }
 
-// Exact CPU flat index for the no-WebGPU fallback (§NFR-7). Quantization and IVF
-// are GPU-throughput optimizations that add nothing to an exact CPU scan, so they
-// aren't ported to the fallback yet — asking for them without a GPU is an error
-// rather than a silent accuracy change.
+// CPU indexes for the no-WebGPU fallback (§NFR-7): exact flat scan, or HNSW —
+// which is CPU-native anyway, making it the one ANN option that works without a
+// GPU. Quantization and IVF are GPU-throughput optimizations that aren't ported
+// to the fallback — asking for them without a GPU is an error rather than a
+// silent accuracy change.
 function buildCpuIndex(dim: number, metric: Metric, quantBits: 0 | 1 | 4 | 8, ann: BrowserVecConfig['ann']): VectorIndex {
+  if (ann?.type === 'hnsw' && quantBits === 0) {
+    return new HNSWIndex(dim, metric, ann);
+  }
   if (quantBits !== 0 || ann) {
     throw new Error(
-      'CPU fallback supports fp32 flat only — quantBits/ann require WebGPU. ' +
+      'CPU fallback supports fp32 flat and HNSW only — quantBits/IVF require WebGPU. ' +
         'Drop them, or run where WebGPU is available.',
     );
   }
@@ -324,13 +352,61 @@ export class BrowserVec {
     if (opts.nprobe !== undefined && 'setNprobe' in this.index) {
       (this.index as { setNprobe(n: number): void }).setNprobe(opts.nprobe);
     }
+    // HNSW: same pattern for the per-query beam width.
+    if (opts.efSearch !== undefined && 'setEf' in this.index) {
+      (this.index as { setEf(n: number): void }).setEf(opts.efSearch);
+    }
+
+    // Metadata filtering (FR-7). Pre-scan the metadata to find matching rows,
+    // then pick a strategy:
+    //  - tiny match set → skip the index and exactly score just the matching
+    //    rows on the CPU (the store keeps the fp32 vectors). Exact on every
+    //    index type, including approximate ones.
+    //  - mask-capable index (flat fp32/quant) → in-index pre-filter: a mask
+    //    pass stamps non-matching rows' scores to -FLT_MAX between the distance
+    //    kernel and top-k, so the GPU returns exactly the top-k matching rows
+    //    at full speed, any selectivity, no over-fetch.
+    //  - other indexes (IVF/HNSW/CPU fallback) → selective filters take the
+    //    exact CPU scan; near-total matches stay on the index path and
+    //    over-fetch by the excluded count, post-filtering (tombstone trick).
+    const predicate = opts.filter ? compileFilter(opts.filter) : null;
+    let skipRows = 0; // live rows the filter excludes (over-fetch path only)
+    let maskWords: Uint32Array | null = null;
+    if (predicate) {
+      const rowCount = this.store.rowCount;
+      const words = new Uint32Array(Math.ceil(rowCount / 32) || 1);
+      const matchRows: number[] = [];
+      for (let row = 0; row < rowCount; row++) {
+        if (this.store.isDeleted(row)) continue;
+        const entry = this.store.entryByRow(row)!;
+        if (predicate(entry.metadata)) {
+          matchRows.push(row);
+          words[row >> 5]! |= 1 << (row & 31);
+        }
+      }
+      if (matchRows.length === 0) return [];
+      if (matchRows.length <= FILTER_CPU_SCAN_MAX) return this.queryRowsExact(q, matchRows, k);
+      if ('queryMasked' in this.index) {
+        maskWords = words; // tombstones never match, so the mask excludes them too
+      } else {
+        skipRows = this.store.count - matchRows.length;
+        if (skipRows > Math.max(2 * k, 256)) return this.queryRowsExact(q, matchRows, k);
+      }
+    }
 
     // Deleted rows are tombstones still scored by the GPU, so over-fetch by the
-    // deleted count and filter them out — guarantees ≥k live results survive.
-    // When nothing is deleted, kEff == k and this is a no-op (unchanged path).
+    // deleted count (plus any filter-excluded live rows) and filter them out —
+    // guarantees ≥k qualifying results survive. When nothing is deleted and no
+    // filter is set, kEff == k and this is a no-op (unchanged path). The masked
+    // path needs no over-fetch at all: excluded rows can't win a top-k slot.
     const deleted = this.store.deletedCount;
     const total = this.index.size;
-    const kEff = Math.min(total, k + deleted);
+    const kEff = maskWords ? Math.min(total, k) : Math.min(total, k + deleted + skipRows);
+
+    const search = (kk: number): Promise<FlatHit[]> =>
+      maskWords
+        ? (this.index as unknown as MaskCapableIndex).queryMasked(q, kk, maskWords)
+        : this.index.query(q, kk);
 
     queryTrace.reset();
     const start = performance.now();
@@ -338,10 +414,10 @@ export class BrowserVec {
     if (this.quantBits > 0) {
       const doRerank = opts.rerank ?? this.rerankFactor > 1;
       const fetch = doRerank ? Math.min(total, Math.max(kEff, kEff * this.rerankFactor)) : kEff;
-      const approx = await this.index.query(q, fetch);
+      const approx = await search(fetch);
       hits = doRerank ? this.rerankExact(q, approx, kEff) : approx.slice(0, kEff);
     } else {
-      hits = await this.index.query(q, kEff);
+      hits = await search(kEff);
     }
     this.lastQueryMs = performance.now() - start;
     this.lastQueryGpuMs = queryTrace.gpuWaitMs;
@@ -350,12 +426,94 @@ export class BrowserVec {
     for (const h of hits) {
       if (deleted && this.store.isDeleted(h.row)) continue;
       const entry = this.store.entryByRow(h.row)!;
+      if (predicate && !predicate(entry.metadata)) continue;
       const out: QueryResult = { id: entry.id, score: h.score };
       if (entry.metadata !== undefined) out.metadata = entry.metadata;
       results.push(out);
       if (results.length === k) break;
     }
     return results;
+  }
+
+  /**
+   * Exact filtered search: score only the pre-filtered `rows` straight from the
+   * store's CPU-side fp32 buffer and keep the top-k. Cost is O(matches · dim),
+   * independent of corpus size — the win of a selective filter. Exact for every
+   * index configuration (quantized/IVF/HNSW included) since it bypasses the
+   * index entirely.
+   */
+  private queryRowsExact(q: Float32Array, rows: number[], k: number): QueryResult[] {
+    queryTrace.reset();
+    const start = performance.now();
+    const scores = new Float32Array(rows.length);
+    if (this.store.metric === 'l2') {
+      for (let i = 0; i < rows.length; i++) scores[i] = this.store.l2Row(rows[i]!, q);
+    } else {
+      for (let i = 0; i < rows.length; i++) scores[i] = this.store.dotRow(rows[i]!, q);
+    }
+    const hits = topK(scores, rows.length, k);
+    this.lastQueryMs = performance.now() - start;
+    this.lastQueryGpuMs = 0;
+
+    return hits.map((h) => {
+      const entry = this.store.entryByRow(rows[h.row]!)!;
+      const out: QueryResult = { id: entry.id, score: h.score };
+      if (entry.metadata !== undefined) out.metadata = entry.metadata;
+      return out;
+    });
+  }
+
+  /**
+   * Query many vectors at once. On an HNSW store with `search: 'gpu'` this is a
+   * SINGLE compute dispatch — one workgroup per query, all concurrent — which is
+   * the regime where the GPU graph kernel beats the CPU walk. Everywhere else it
+   * degrades gracefully to a sequential loop over query(). Results are per-query,
+   * same order as the input.
+   */
+  async queryBatch(queries: Vector[], opts: QueryOptions = {}): Promise<QueryResult[][]> {
+    if (queries.length === 0) return [];
+    // Filtered batches go through query() per vector: the filter machinery
+    // (selectivity choice, exact scan, over-fetch) lives there.
+    if (!('queryBatch' in this.index) || opts.filter) {
+      const out: QueryResult[][] = [];
+      for (const q of queries) out.push(await this.query(q, opts));
+      return out;
+    }
+    const k = opts.k ?? 10;
+    const dim = this.store.dimension;
+    const packed = new Float32Array(queries.length * dim);
+    for (let i = 0; i < queries.length; i++) {
+      const q = queries[i]!;
+      if (q.length !== dim) throw new Error(`query dim ${q.length} != store dim ${dim}`);
+      packed.set(q, i * dim);
+      if (this.store.normalize) normalizeInPlace(packed.subarray(i * dim, (i + 1) * dim));
+    }
+    if (opts.efSearch !== undefined && 'setEf' in this.index) {
+      (this.index as { setEf(n: number): void }).setEf(opts.efSearch);
+    }
+
+    const deleted = this.store.deletedCount;
+    const kEff = Math.min(this.index.size, k + deleted);
+    queryTrace.reset();
+    const start = performance.now();
+    const batch = await (
+      this.index as unknown as { queryBatch(q: Float32Array, n: number, k: number): Promise<FlatHit[][]> }
+    ).queryBatch(packed, queries.length, kEff);
+    this.lastQueryMs = performance.now() - start;
+    this.lastQueryGpuMs = queryTrace.gpuWaitMs;
+
+    return batch.map((hits) => {
+      const results: QueryResult[] = [];
+      for (const h of hits) {
+        if (deleted && this.store.isDeleted(h.row)) continue;
+        const entry = this.store.entryByRow(h.row)!;
+        const out: QueryResult = { id: entry.id, score: h.score };
+        if (entry.metadata !== undefined) out.metadata = entry.metadata;
+        results.push(out);
+        if (results.length === k) break;
+      }
+      return results;
+    });
   }
 
   /**
@@ -442,14 +600,14 @@ export class BrowserVec {
     if (!this.backend || !this.persistName) {
       throw new Error('save() requires a persist config; pass { persist: { name } } to create()');
     }
-    let bytes = this.snapshotBytes();
+    let bytes = await this.snapshotBytes();
     if (this.persistPassphrase) bytes = await encryptSnapshot(bytes, this.persistPassphrase);
     await this.backend.write(this.persistName, bytes);
   }
 
   /** Serialize the whole store to a single Blob. Optionally encrypted. */
   async export(opts?: ExportOptions): Promise<Blob> {
-    let bytes = this.snapshotBytes();
+    let bytes = await this.snapshotBytes();
     const passphrase = opts?.encryption?.passphrase;
     if (passphrase) bytes = await encryptSnapshot(bytes, passphrase);
     return new Blob([bytes], { type: 'application/octet-stream' });
@@ -485,7 +643,7 @@ export class BrowserVec {
     return db;
   }
 
-  private snapshotBytes(): ArrayBuffer {
+  private async snapshotBytes(): Promise<ArrayBuffer> {
     // Compact out tombstoned rows so persisted/exported snapshots hold only live
     // vectors (and a reload reclaims their memory). liveEntries/liveVectors are
     // row-aligned.
@@ -493,14 +651,23 @@ export class BrowserVec {
     const entries = live.map((e) =>
       e.metadata !== undefined ? { id: e.id, metadata: e.metadata } : { id: e.id },
     );
-    return serialize({
+    // Persist the HNSW graph so loads skip the rebuild (M7c) — but only when no
+    // rows are tombstoned: compaction renumbers rows, which would invalidate the
+    // graph's adjacency. A post-delete snapshot just falls back to rebuild-on-load.
+    let graph;
+    if (this.store.deletedCount === 0 && 'exportGraphState' in this.index) {
+      graph = (await (this.index as unknown as HNSWIndex).exportGraphState()) ?? undefined;
+    }
+    const input: Parameters<typeof serialize>[0] = {
       dimension: this.store.dimension,
       metric: this.store.metric,
       normalize: this.store.normalize,
       count: live.length,
       entries,
       vectors: this.store.liveVectors(),
-    });
+    };
+    if (graph) input.graph = graph;
+    return serialize(input);
   }
 
   private async loadSnapshot(snap: Snapshot): Promise<void> {
@@ -518,7 +685,18 @@ export class BrowserVec {
       // Vectors were stored already prepared (normalized if applicable) — insert as-is.
       this.store.insert(e.id, vec, e.metadata);
     }
-    await this.index.append(snap.vectors.subarray(0, snap.count * dim), snap.count);
+    const vectors = snap.vectors.subarray(0, snap.count * dim);
+    // A persisted HNSW graph restores directly when the index config matches (M7c),
+    // skipping the O(N·efConstruction) rebuild. Any mismatch — different index
+    // type, different M — just rebuilds via the normal append path.
+    if (snap.graph && snap.count > 0 && 'loadWithGraph' in this.index) {
+      const hnsw = this.index as unknown as HNSWIndex;
+      if (hnsw.M === snap.graph.M) {
+        await hnsw.loadWithGraph(vectors, snap.count, snap.graph);
+        return;
+      }
+    }
+    await this.index.append(vectors, snap.count);
   }
 
   stats(): Stats {
@@ -540,6 +718,13 @@ export class BrowserVec {
     if ('nlist' in this.index) {
       const nlist = (this.index as { nlist: number }).nlist;
       if (nlist > 0) out.nlist = nlist;
+    }
+    if ('maxLevel' in this.index) {
+      const maxLevel = (this.index as { maxLevel: number }).maxLevel;
+      if (maxLevel >= 0) out.maxLevel = maxLevel;
+    }
+    if ('searchMode' in this.index) {
+      out.graphSearch = (this.index as { searchMode: 'gpu' | 'cpu' }).searchMode;
     }
     if ('ingestMode' in this.index) {
       const mode = (this.index as { ingestMode: 'worker' | 'main-thread' | 'pending' }).ingestMode;

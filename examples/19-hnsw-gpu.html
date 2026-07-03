@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BrowserVec — 19. GPU graph search</title>
+<style>.bv-nav{font-size:.78rem;margin:0 0 1rem;color:#888;}.bv-nav a{color:#888;text-decoration:none;}.bv-nav a:hover{color:#1a73e8;text-decoration:underline;}body{font:14px/1.5 ui-monospace,monospace;margin:2rem;max-width:780px}pre{background:#111;color:#b9f;padding:1rem;border-radius:6px;overflow:auto}button{font:inherit;padding:.4rem .8rem;cursor:pointer}.ok{color:#5c5}.bad{color:#f55}.dim{color:#888}.hl{color:#fe9}h2{font-size:1.1rem;border-bottom:1px solid #333;padding-bottom:.25rem}</style>
+</head>
+<body>
+<p class="bv-nav"><a href="./">&larr; All examples</a> &middot; <a href="../">Home</a></p>
+<h1>19. GPU graph search (M7b)</h1>
+<p class="dim">The HNSW graph from example 18, but searched by a <b>CAGRA-style WGSL kernel</b>: the whole beam search runs inside <b>one compute dispatch</b> — candidate beam, visited set, and reductions all live in workgroup shared memory, so there is no per-hop readback. One workgroup per query means <code>queryBatch()</code> searches every query concurrently. The honest trade: a <b>single</b> query pays fixed dispatch+readback latency (~ms) that the CPU walk doesn't — <b>batches</b> are where the GPU wins. This example measures both, plus recall. <b>GPU-only</b> (falls back to CPU search without WebGPU).</p>
+
+<pre id="out">ready.</pre>
+
+<p>
+<label>vectors <input id="n" type="number" value="60000" /></label>
+<label>dim <input id="dim" type="number" value="768" /></label>
+<label>batch <input id="batch" type="number" value="128" /></label>
+<button id="run">Run GPU graph benchmark</button>
+</p>
+
+<script type="module">
+import { BrowserVec } from '../src/index.ts';
+
+const $ = (id) => document.getElementById(id);
+const out = $('out');
+const log = (msg, cls = '') => (out.innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`);
+const rand = (dim) => { const v = new Float32Array(dim); for (let i = 0; i < dim; i++) v[i] = Math.random() * 2 - 1; return v; };
+
+$('run').onclick = async () => {
+  out.textContent = '';
+  if (!BrowserVec.isSupported().webgpu) {
+    log('This example is GPU-only — without WebGPU, HNSW transparently uses CPU search (example 18).', 'bad');
+    return;
+  }
+
+  const n = +$('n').value;
+  const dim = +$('dim').value;
+  const nQ = +$('batch').value;
+  const k = 10;
+
+  const centers = Array.from({ length: 100 }, () => rand(dim));
+  const corpus = Array.from({ length: n }, () => {
+    const c = centers[(Math.random() * centers.length) | 0];
+    const v = new Float32Array(dim);
+    for (let d = 0; d < dim; d++) v[d] = c[d] + (Math.random() * 2 - 1) * 0.35;
+    return v;
+  });
+  const records = corpus.map((v, i) => ({ id: `v${i}`, vector: v }));
+  const qs = Array.from({ length: nQ }, () => corpus[(Math.random() * n) | 0]);
+
+  log(`--- ground truth (exact fp32 flat) ---`);
+  const f = await BrowserVec.create({ dimension: dim, metric: 'cosine' });
+  await f.addBatch(records);
+  await f.query(qs[0], { k });
+  const truth = [];
+  for (const q of qs) truth.push(new Set((await f.query(q, { k })).map((h) => h.id)));
+  f.destroy();
+  log(`done (${nQ} queries)`, 'ok');
+
+  const recallOf = (lists) => {
+    let hit = 0;
+    lists.forEach((got, i) => (hit += got.filter((h) => truth[i].has(h.id)).length));
+    return hit / (nQ * k);
+  };
+
+  // Same graph, same seed — one store walks it on the CPU, one on the GPU.
+  log(`\n--- building the graph (once per store, during ingest) ---`);
+  const mk = async (search) => {
+    const t = performance.now();
+    const db = await BrowserVec.create({ dimension: dim, metric: 'cosine', ann: { type: 'hnsw', seed: 7, search } });
+    await db.addBatch(records);
+    await db.query(qs[0], { k }); // warm (uploads graph on the gpu store)
+    log(`${search}: built in ${(performance.now() - t).toFixed(0)} ms (graphSearch=${db.stats().graphSearch})`, 'dim');
+    return db;
+  };
+  const cpuDb = await mk('cpu');
+  const gpuDb = await mk('gpu');
+
+  log(`\nengine        mode      recall@${k}   total ms   ms/query`);
+  log(`------        ----      ----------   --------   --------`);
+  for (const [name, db] of [['cpu', cpuDb], ['gpu', gpuDb]]) {
+    // Single-query loop.
+    let t = performance.now();
+    const single = [];
+    for (const q of qs) single.push(await db.query(q, { k, efSearch: 64 }));
+    const sMs = performance.now() - t;
+    log(`hnsw-${name}      single    ${(recallOf(single) * 100).toFixed(1)}%       ${sMs.toFixed(1)}     ${(sMs / nQ).toFixed(3)}`);
+    // Batch: ONE dispatch on the gpu path.
+    t = performance.now();
+    const batch = await db.queryBatch(qs, { k, efSearch: 64 });
+    const bMs = performance.now() - t;
+    const cls = name === 'gpu' ? 'ok' : '';
+    log(`hnsw-${name}      batch     ${(recallOf(batch) * 100).toFixed(1)}%       ${bMs.toFixed(1)}     ${(bMs / nQ).toFixed(3)}`, cls);
+  }
+
+  cpuDb.destroy();
+  gpuDb.destroy();
+  log(`\nSingle queries: the CPU walk wins — the GPU pays ~ms dispatch+readback per call.`, 'dim');
+  log(`Batched queries: one workgroup per query in one dispatch — the GPU searches`, 'dim');
+  log(`them all concurrently, and wins more the bigger the corpus/dim/batch.`, 'dim');
+};
+</script>
+</body>
+</html>

@@ -17,6 +17,7 @@ import {
 import { buildDistanceShader } from '../engine/wgsl/distance.js';
 import { tracedGpuWait } from '../engine/profile.js';
 import { GpuTopK } from './gpuTopk.js';
+import { ScoreMask, MASKED_SCORE } from './scoreMask.js';
 
 const WORKGROUP_SIZE = 64;
 
@@ -47,6 +48,7 @@ export class FlatIndex {
   private scoreCapacity = 0;
   private rows = 0;
   private gpuTopk: GpuTopK | null = null;
+  private masker: ScoreMask | null = null;
   private readonly paramsScratch = new Uint32Array(4);
 
   constructor(
@@ -113,7 +115,25 @@ export class FlatIndex {
   }
 
   /** Run the kernel over all rows and return the top-k by score (higher = closer). */
-  async query(queryVec: Float32Array, k: number): Promise<FlatHit[]> {
+  query(queryVec: Float32Array, k: number): Promise<FlatHit[]> {
+    return this.search(queryVec, k, null);
+  }
+
+  /**
+   * Filtered query (FR-7): same full distance dispatch, then a mask pass stamps
+   * the -FLT_MAX sentinel over rows whose bit is clear before top-k — masked
+   * rows can't win a slot, so results are exactly the top-k *matching* rows
+   * with no over-fetch. `maskWords` is 1 bit per global row, LSB-first.
+   */
+  queryMasked(queryVec: Float32Array, k: number, maskWords: Uint32Array): Promise<FlatHit[]> {
+    return this.search(queryVec, k, maskWords);
+  }
+
+  private async search(
+    queryVec: Float32Array,
+    k: number,
+    maskWords: Uint32Array | null,
+  ): Promise<FlatHit[]> {
     if (this.ctx.lost) throw new Error('GPU device lost; re-create the store');
     if (this.rows === 0) return [];
 
@@ -148,9 +168,17 @@ export class FlatIndex {
       device.queue.submit([enc.finish()]);
     });
 
+    // Filtered query: stamp the sentinel over masked-out rows before top-k.
+    // Queue-ordered after the distance dispatches above.
+    if (maskWords) {
+      this.masker ??= new ScoreMask(this.ctx);
+      this.masker.apply(sp.scores, this.rows, maskWords);
+    }
+
     // Reduce on the GPU once the O(N) score readback dominates; below the
     // threshold (or when a very large k would make the partials list exceed the
     // full readback) the copy-back + CPU sort is cheaper than a second dispatch.
+    // The GPU merge already drops sentinel (masked/filler) slots.
     if (GpuTopK.beneficial(this.rows, k)) {
       this.gpuTopk ??= new GpuTopK(this.ctx);
       return this.gpuTopk.query(sp.scores, this.rows, k);
@@ -166,7 +194,9 @@ export class FlatIndex {
     const scores = new Float32Array(sp.readback.getMappedRange(0, this.rows * 4));
     const hits = topK(scores, this.rows, k);
     sp.readback.unmap();
-    return hits;
+    // When k exceeds the number of matching rows, sentinel slots reach the CPU
+    // select — drop them (the GPU reduction path does this in its merge).
+    return maskWords ? hits.filter((h) => h.score > MASKED_SCORE) : hits;
   }
 
   destroy(): void {
@@ -176,6 +206,7 @@ export class FlatIndex {
     this.scores?.scores.destroy();
     this.scores?.readback.destroy();
     this.gpuTopk?.destroy();
+    this.masker?.destroy();
   }
 }
 
@@ -185,6 +216,7 @@ export class FlatIndex {
  */
 export function topK(scores: Float32Array, n: number, k: number): FlatHit[] {
   const limit = Math.min(k, n);
+  if (limit <= 0) return [];
   const heap: FlatHit[] = [];
   for (let row = 0; row < n; row++) {
     const score = scores[row]!;

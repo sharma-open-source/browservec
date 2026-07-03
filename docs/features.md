@@ -51,7 +51,9 @@ const copy = await BrowserVec.import(blob);  // rebuild from a blob
 The snapshot is a versioned binary blob (`BVEC` magic + header + metadata JSON +
 packed Float32 vectors). Vectors are persisted **already normalized** (as
 searched), so a reload reproduces query results exactly. A dimension/metric
-mismatch on load throws rather than silently corrupting results. Byte layout:
+mismatch on load throws rather than silently corrupting results. HNSW stores
+additionally embed their graph so loads skip the index rebuild — see
+[Graph persistence](#graph-persistence-m7c). Byte layout:
 [internals.md#persistence-format](./internals.md#persistence-format-srcpersistformatts).
 
 > **Try it:** [`examples/06-persistence.html`](../examples/06-persistence.html)
@@ -214,6 +216,110 @@ it's ~128 B/row, so 1M×768 fits in well under 200 MB and the binary scan+rerank
 tracks the exact scan of the probed set to within ~0.005 recall.
 
 > **Try it:** [`examples/04-ivf-quant-combo.html`](../examples/04-ivf-quant-combo.html)
+
+## Graph search — HNSW (M7)
+
+```ts
+const db = await BrowserVec.create({
+  dimension: 768,
+  metric: 'cosine',              // HNSW supports cosine, dot, AND l2
+  ann: { type: 'hnsw' },         // defaults: M: 16, efConstruction: 200, efSearch: 64
+});
+
+await db.addBatch(records);                                 // graph built incrementally, in a Worker
+const hits = await db.query(q, { k: 10 });                  // default efSearch
+const wide = await db.query(q, { k: 10, efSearch: 200 });   // wider beam → higher recall, slower
+```
+
+The second ANN family, alongside IVF (`ann` is a discriminated union — omit
+`type` or pass `'ivf'` for clustering, `'hnsw'` for the graph). Every vector
+becomes a node in a **layered proximity graph** (Hierarchical Navigable Small
+World): layer 0 links each node to ≤ 2·M near neighbors, and each higher layer
+keeps an exponentially thinner subset as an express lane. A query greedily
+descends from the sparse top layer, then runs a best-first **beam search** of
+width `efSearch` on the bottom layer — visiting O(log N) nodes instead of
+scanning all N. On a 20k clustered corpus, recall@10 is ~0.98 at `efSearch: 10`
+and 1.0 by `efSearch: 40`, at ~10× the speed of the exact CPU scan.
+
+Where it differs from IVF, and when to pick it:
+
+- **Incremental inserts.** IVF rebuilds its clustering lazily after appends;
+  HNSW inserts extend the graph directly, so continuously-growing stores pay no
+  rebuild on the next query. The flip side: the build cost lives *at ingest
+  time* (`efConstruction` beam per insert — seconds for tens of thousands of
+  rows), which is why it runs **off the main thread** (below).
+- **CPU-resident.** Graph traversal is sequential pointer-chasing — the
+  opposite shape from the batch-parallel scan kernels — so build *and* search
+  run on the CPU, hosted in an inlined Web Worker when available (same seam
+  pattern as [Worker offload](#worker-ingest-offload-nfr-8); `stats().train`
+  reports `'worker'` or `'main-thread'`). Because it needs no GPU at all, HNSW
+  is **the one ANN index that works on the [CPU fallback](#cpu-fallback--no-webgpu-nfr-7--m6)**
+  (`fallback: 'wasm'`) — and it supports `metric: 'l2'`, which IVF doesn't.
+- **fp32 only for now** — `quantBits` + HNSW is future work; IVF×quant remains
+  the memory-constrained 1M path.
+
+Builds are deterministic: the level RNG is seeded (`seed`), so the same inserts
+in the same order produce the same graph whether it was built in the Worker or
+in-thread.
+
+> **Try it:** [`examples/18-hnsw-index.html`](../examples/18-hnsw-index.html)
+
+### GPU graph search (M7b)
+
+```ts
+const db = await BrowserVec.create({
+  dimension: 768,
+  metric: 'cosine',
+  ann: { type: 'hnsw', search: 'gpu' },  // default 'cpu'
+});
+await db.addBatch(records);
+
+// The GPU's regime: many queries, ONE dispatch (one workgroup per query).
+const perQuery = await db.queryBatch(queries, { k: 10, efSearch: 64 });
+db.stats().graphSearch; // 'gpu' — or 'cpu' after a capacity fallback
+```
+
+Graph ANN is usually written off for GPUs because a naive port needs one
+dispatch + readback **per hop** (~ms each in a browser). `search: 'gpu'` instead
+runs the *entire* beam search inside **one compute dispatch**, CAGRA-style: a
+single workgroup owns one query and keeps the whole search state in workgroup
+shared memory — the candidate beam, a hashed visited set, and the argmin/argmax
+reductions — expanding the best unexpanded node and fanning its K neighbors
+across lanes each iteration, with no per-hop round-trip. The CPU (Worker) still
+*builds* the graph; the GPU mirrors the corpus and the flat layer-0 adjacency
+and searches it.
+
+**The honest trade** (measured, Apple M-series): a *single* query pays fixed
+dispatch + `mapAsync` readback latency (~3–4 ms) that the CPU walk (~0.1–0.4 ms)
+doesn't — so for one-at-a-time queries, keep the default `search: 'cpu'`. Batches
+flip it: at 60k×768, `queryBatch` of 128 queries completes in ~13.5 ms — **0.105
+ms/query at 0.97 recall@10, ~4× faster than the CPU walk** — and the margin grows
+with corpus size, dimension, and batch size. `queryBatch` exists on every store
+type (it degrades to a sequential loop elsewhere), so code written against it
+picks up the GPU win when the config allows.
+
+Constraints: `M ≤ 32`, `efSearch ≤ 256` on the GPU path, and the corpus must fit
+one storage buffer (graph hops can't be chunked across bind groups the way linear
+scans are — past the device limit the store falls back to CPU search permanently
+and `stats().graphSearch` reports `'cpu'`).
+
+> **Try it:** [`examples/19-hnsw-gpu.html`](../examples/19-hnsw-gpu.html)
+
+### Graph persistence (M7c)
+
+Nothing to configure: `save()`/`export()` on an HNSW store embed the graph
+structure in the snapshot, and a load restores it directly instead of
+re-inserting every row — **~180× faster** in practice (20k×128: 19 ms load vs
+3.5 s rebuild), with query results identical to the never-saved store. Post-load
+inserts stay deterministic too (the level RNG is fast-forwarded to where it
+would have been).
+
+Graph-carrying snapshots use format **v2**; snapshots *without* a graph (flat,
+IVF, quantized stores) still write v1, so older builds keep reading everything
+they could before. The fallbacks all rebuild instead of erroring: snapshots
+taken with pending tombstones (compaction renumbers rows), imports with a
+different `M`, or imports into a non-HNSW store simply ignore the graph section.
+Byte layout: [internals.md#persistence-format](./internals.md#persistence-format-srcpersistformatts).
 
 ## Text retrieval — on-device embedder (M5)
 
@@ -408,9 +514,12 @@ scores in place with no copy. Engines lacking WASM/SIMD transparently drop to th
 loop — identical results, just slower. The 526-byte module ships as a base64 constant, so
 there's no build-time or runtime WASM toolchain and the single-file inlined dist is preserved.
 
-Scope for now: the CPU path serves **fp32 flat only** — `quantBits`/`ann` are
-GPU-throughput optimizations that add nothing to an exact CPU scan, so requesting
-them without a GPU is a clear error rather than a silent accuracy change. The demo's
+Scope for now: the CPU path serves **fp32 flat and HNSW** (`ann: { type: 'hnsw' }`
+— the graph index is CPU-native anyway, making it the one ANN option available
+without a GPU; see [Graph search](#graph-search--hnsw-m7)). `quantBits` and IVF
+are GPU-throughput optimizations that add nothing to an exact CPU scan, so
+requesting them without a GPU is a clear error rather than a silent accuracy
+change. The demo's
 **CPU fallback** button flips an internal force-CPU seam to run the fallback in a
 WebGPU browser and verifies it returns the same neighbors as the GPU on identical data.
 

@@ -41,10 +41,12 @@ export interface BrowserVecConfig {
   /** TurboQuant tuning (only used when quantBits > 0). */
   quant?: QuantConfig;
   /**
-   * Enable the IVF approximate index (M4). When set, queries scan only the
-   * `nprobe` nearest of `nlist` clusters instead of the whole corpus — trading a
-   * little recall for a large latency drop at scale. Omit for exact flat search.
-   * Currently fp32 + cosine/dot only.
+   * Enable an approximate (ANN) index. Omit for exact flat search.
+   * - `{ type: 'ivf' }` (or omitted `type`, M4): k-means clusters, queries scan
+   *   only the `nprobe` nearest of `nlist` — GPU-only, fp32 + cosine/dot.
+   * - `{ type: 'hnsw' }` (M7): CPU graph index searched by greedy descent —
+   *   sub-linear queries with incremental inserts, works with or without WebGPU
+   *   and on any metric. Currently fp32 only.
    */
   ann?: ANNConfig;
   /**
@@ -58,7 +60,11 @@ export interface BrowserVecConfig {
   chunkRows?: number;
 }
 
-export interface ANNConfig {
+export type ANNConfig = IVFConfig | HNSWConfig;
+
+export interface IVFConfig {
+  /** Index family. IVF is the default when `type` is omitted. */
+  type?: 'ivf';
   /** Number of clusters. Default ≈ sqrt(count), clamped to [16, 4096]. */
   nlist?: number;
   /** Clusters scanned per query. Default ≈ 5% of nlist. Higher = better recall, slower. */
@@ -69,6 +75,29 @@ export interface ANNConfig {
   iters?: number;
   /** Seed for sampling + k-means, for reproducible builds. */
   seed?: number;
+}
+
+export interface HNSWConfig {
+  /** Index family: HNSW graph (M7). */
+  type: 'hnsw';
+  /** Graph out-degree per layer (layer 0 keeps 2·M). Higher = better recall, more memory + slower build. Default 16. */
+  M?: number;
+  /** Candidate-list width while building. Higher = better graph quality, slower ingest. Default 200. */
+  efConstruction?: number;
+  /** Default candidate-list width at query time (clamped to ≥ k). Higher = better recall, slower. Default 64. */
+  efSearch?: number;
+  /** Seed for the level RNG, for reproducible builds. */
+  seed?: number;
+  /**
+   * Where queries run (M7b). 'cpu' (default): graph walk in the Worker/in-thread.
+   * 'gpu': single-dispatch beam-search kernel — the whole search runs inside one
+   * compute dispatch, one workgroup per query, so `queryBatch` searches every
+   * query concurrently. Requires WebGPU, M ≤ 32, efSearch ≤ 256, and the corpus
+   * within one storage buffer (falls back to 'cpu' past that; see
+   * stats().graphSearch). Single queries pay fixed dispatch+readback latency —
+   * batches and large corpora are where 'gpu' wins. Ignored on the CPU fallback.
+   */
+  search?: 'cpu' | 'gpu';
 }
 
 export interface QuantConfig {
@@ -146,9 +175,45 @@ export interface QueryResult {
   metadata?: Metadata;
 }
 
+/** A metadata value usable in filters (matches the Metadata value type). */
+export type FilterValue = string | number | boolean | null;
+
+/** Per-field operators for {@link MetadataFilter}. Multiple operators AND together. */
+export interface FilterOps {
+  /** Field equals the value (strict ===). */
+  $eq?: FilterValue;
+  /** Field differs from the value; also matches records missing the field. */
+  $ne?: FilterValue;
+  /** Field equals any of the listed values. */
+  $in?: FilterValue[];
+  /** Numeric comparisons — only match when the stored value is a number. */
+  $gt?: number;
+  $gte?: number;
+  $lt?: number;
+  $lte?: number;
+}
+
+/**
+ * Mongo-ish metadata predicate (FR-7): fields AND together, a bare value is
+ * shorthand for `{ $eq: value }`. Example:
+ * `{ lang: 'en', year: { $gte: 2020 }, tag: { $in: ['a', 'b'] } }`.
+ */
+export type MetadataFilter = Record<string, FilterValue | FilterOps>;
+
 export interface QueryOptions {
   /** Number of neighbors to return. Default 10. */
   k?: number;
+  /**
+   * Only return records whose metadata matches this predicate. Tiny match sets
+   * (≤ ~4k rows) run as an exact CPU scan over just the matching rows — exact
+   * on every index type. On flat stores (fp32 or quantized) larger filters run
+   * in-index on the GPU: a mask pass excludes non-matching rows between the
+   * distance kernel and top-k, so filtered queries keep full GPU speed at any
+   * selectivity (exact for fp32; quantized keeps its usual re-rank recall).
+   * IVF/HNSW/CPU-fallback stores fall back to the exact CPU scan for selective
+   * filters and index-with-over-fetch for near-total matches.
+   */
+  filter?: MetadataFilter;
   /**
    * Override exact re-rank for this query (quantized stores only). Defaults to
    * the store's configured behavior. Has no effect on fp32 stores.
@@ -159,6 +224,11 @@ export interface QueryOptions {
    * default — higher = better recall, slower. No effect on flat stores.
    */
   nprobe?: number;
+  /**
+   * Candidate-list width for this query (HNSW stores only). Overrides the
+   * configured `efSearch` — higher = better recall, slower. Clamped to ≥ k.
+   */
+  efSearch?: number;
 }
 
 export interface SupportInfo {
@@ -189,8 +259,12 @@ export interface Stats {
   persist?: 'opfs' | 'indexeddb';
   /** Quantization bit-width in use (0 = fp32). */
   quantBits: 0 | 1 | 4 | 8;
-  /** IVF cluster count, if an ANN index is in use and built. */
+  /** IVF cluster count, if an IVF index is in use and built. */
   nlist?: number;
+  /** HNSW top graph layer, if an HNSW index is in use and non-empty. */
+  maxLevel?: number;
+  /** HNSW query engine: 'gpu' (beam-search kernel) or 'cpu' (graph walk). */
+  graphSearch?: 'gpu' | 'cpu';
   /** Number of GPU buffers the corpus spans. >1 once it overflows one buffer. */
   chunks?: number;
   /**
@@ -200,9 +274,10 @@ export interface Stats {
    */
   ingest?: 'worker' | 'main-thread';
   /**
-   * Where the IVF k-means centroid mean-update ran (§NFR-8): 'worker'
-   * (offloaded off the main thread) or 'main-thread' (no Worker — ran in-thread).
-   * Absent for non-IVF stores and before the index's first build.
+   * Where the ANN index build ran (§NFR-8): 'worker' (offloaded off the main
+   * thread) or 'main-thread' (no Worker — ran in-thread). For IVF this is the
+   * k-means centroid mean-update; for HNSW it is the graph construction.
+   * Absent for flat stores and before the index's first build.
    */
   train?: 'worker' | 'main-thread';
 }
