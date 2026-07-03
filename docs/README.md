@@ -4,6 +4,8 @@ Start here, then follow the path that matches what you're doing.
 
 ## I'm new to BrowserVec
 
+- **[Beginner guide](./guide/beginner.md)** — what's a vector? what's similarity search?
+  plain-language walkthrough, no ANN jargon
 - [Quick start](../README.md#quick-start) — get the demo running in 2 commands
 - [Features](../README.md#features) — overview of every capability
 - [Core API](../README.md#core-api) — minimal code example to see the shape
