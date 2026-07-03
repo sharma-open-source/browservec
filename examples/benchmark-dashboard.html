@@ -32,6 +32,8 @@
   .log-area { margin-top: 1rem; }
   .log-area summary { cursor: pointer; font-weight: 600; color: #555; font-size: .85rem; }
   ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+  .loader { display: none; width: 18px; height: 18px; border: 2px solid #ddd; border-top-color: #1a73e8; border-radius: 50%; animation: spin .6s linear infinite; margin-left: .5rem; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -112,6 +114,7 @@ latency, recall, memory, and ingest speed, all running live in this tab on synth
     </select>
   </label>
   <button id="runBtn">Run Benchmark</button>
+  <span class="loader" id="loader"></span>
 </div>
 <div class="note" id="configNote"></div>
 
@@ -151,6 +154,8 @@ import {
 
 const $ = (id) => document.getElementById(id);
 const log = (msg, cls = '') => { $('log').innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`; };
+const showLoader = () => $('loader').style.display = 'inline-block';
+const hideLoader = () => $('loader').style.display = 'none';
 
 // ---- Synthetic clustered corpus ----
 // Uniform-random vectors are a worst case for approximate search (no structure
@@ -205,6 +210,7 @@ async function runAll() {
   const efSearch = Math.max(parseInt($('hnswEfSearch').value), k);
 
   $('runBtn').disabled = true;
+  showLoader();
   $('log').textContent = '';
   $('resultsBody').innerHTML = `<tr><td colspan="9" style="text-align:center;color:#999;">Running…</td></tr>`;
 
@@ -242,6 +248,7 @@ async function runAll() {
     `${n.toLocaleString()} rows × ${dim} dim, ${queryCount} queries, k=${k}. ` +
     `Ground truth: naive JS brute force (exact). HNSW: efConstruction=${efConstruction}, M=${m}, efSearch=${efSearch}.`;
   $('runBtn').disabled = false;
+  hideLoader();
 }
 
 function updateConfigNote() {

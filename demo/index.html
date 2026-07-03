@@ -10,6 +10,8 @@
       button { font: inherit; padding: 0.5rem 1rem; cursor: pointer; }
       pre { background: #111; color: #b9f; padding: 1rem; border-radius: 6px; overflow: auto; }
       .ok { color: #5c5; } .bad { color: #f55; } .dim { color: #888; }
+      .loader { display: none; width: 16px; height: 16px; border: 2px solid #ddd; border-top-color: #5c5; border-radius: 50%; animation: spin .6s linear infinite; margin-left: .5rem; vertical-align: middle; }
+      @keyframes spin { to { transform: rotate(360deg); } }
     </style>
   </head>
   <body>
@@ -35,6 +37,7 @@
       <button id="persist">Test persistence (M2)</button>
       <button id="encrypt">Encrypted persist (M6)</button>
       <button id="delete">Delete + compaction</button>
+      <span class="loader" id="loader"></span>
     </p>
     <pre id="out">ready.</pre>
 
@@ -44,6 +47,8 @@
       const out = document.getElementById('out');
       const log = (msg, cls = '') =>
         (out.innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`);
+      const showLoader = () => document.getElementById('loader').style.display = 'inline-block';
+      const hideLoader = () => document.getElementById('loader').style.display = 'none';
 
       function randVec(dim) {
         const v = new Float32Array(dim);
@@ -75,9 +80,10 @@
 
       document.getElementById('run').onclick = async () => {
         out.textContent = '';
+        showLoader();
         const support = BrowserVec.isSupported();
         log(`support: ${JSON.stringify(support)}`);
-        if (!support.webgpu) return log('WebGPU not available in this browser.', 'bad');
+        if (!support.webgpu) { hideLoader(); return log('WebGPU not available in this browser.', 'bad'); }
 
         const n = +document.getElementById('n').value;
         const dim = +document.getElementById('dim').value;
@@ -112,12 +118,14 @@
         log(`top hit: ${gpuIds[0]} (gpu score ${hits[0].score.toFixed(4)}, cpu ${ref[0].score.toFixed(4)})`);
 
         db.destroy();
+        hideLoader();
       };
 
       // M3: compare int8 TurboQuant (with GPU kernel) against fp32 flat ground truth.
       document.getElementById('quant').onclick = async () => {
         out.textContent = '';
-        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+        showLoader();
+        if (!BrowserVec.isSupported().webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
 
         const n = +document.getElementById('n').value;
         const dim = +document.getElementById('dim').value;
@@ -166,6 +174,7 @@
           qd.destroy();
         }
         log(`(raw recall drops as bits shrink — int4, then 1-bit; exact re-rank recovers it — that's the design)`, 'dim');
+        hideLoader();
       };
       function nextPow2(n) { let p = 4; while (p < n) p <<= 1; return p; }
 
@@ -191,6 +200,7 @@
       // adapter limits, OPFS/WASM-SIMD/Worker support, and the CPU-fallback path.
       document.getElementById('m6report').onclick = async () => {
         out.textContent = '';
+        showLoader();
         log('Running M6 device report — ~10–40s depending on device. Keep this tab focused.\n', 'dim');
 
         // Deterministic PRNG (mulberry32) → identical corpus on every device.
@@ -309,12 +319,14 @@
         log(JSON.stringify(report));
         log('=== END BROWSERVEC M6 REPORT ===', 'ok');
         log('\nSelect everything between the BEGIN/END lines and paste it back (one per device).', 'dim');
+        hideLoader();
       };
 
       // M4: IVF approximate index vs fp32 flat ground truth, sweeping nprobe.
       document.getElementById('ivf').onclick = async () => {
         out.textContent = '';
-        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+        showLoader();
+        if (!BrowserVec.isSupported().webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
 
         const n = +document.getElementById('n').value;
         const dim = +document.getElementById('dim').value;
@@ -365,13 +377,15 @@
           );
         }
         db.destroy();
+        hideLoader();
       };
 
       // M4 combo: IVF × int8 — clusters + quantizes so 1M fits AND only nprobe lists
       // are scanned. Compares against fp32 flat truth and reports memory + recall.
       document.getElementById('combo').onclick = async () => {
         out.textContent = '';
-        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+        showLoader();
+        if (!BrowserVec.isSupported().webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
 
         const n = +document.getElementById('n').value;
         const dim = +document.getElementById('dim').value;
@@ -441,12 +455,14 @@
           log(`  nprobe=${nlist} (full scan, diagnostic): recall@${k}=${(dh / (queries * k)).toFixed(3)}`, 'dim');
           db.destroy();
         }
+        hideLoader();
       };
 
       // M5: end-to-end text retrieval, fully offline (zero-dep hashing embedder).
       document.getElementById('text').onclick = async () => {
         out.textContent = '';
-        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+        showLoader();
+        if (!BrowserVec.isSupported().webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
 
         const embedder = hashingEmbedder({ dimension: 384 });
         const db = await BrowserVec.create({ dimension: 384, metric: 'cosine', embedder });
@@ -470,6 +486,7 @@
         log(`\nnote: hashingEmbedder is lexical (keyword), not semantic.`, 'dim');
         log(`swap transformersEmbedder() for meaning — same store/query code.`, 'dim');
         db.destroy();
+        hideLoader();
       };
 
       // NFR-8: the CPU-heavy rotate+quantize of a quantized ingest runs in a Web
@@ -479,7 +496,8 @@
       // the UI would stay interactive during ingest.
       document.getElementById('worker').onclick = async () => {
         out.textContent = '';
-        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+        showLoader();
+        if (!BrowserVec.isSupported().webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
 
         const n = +document.getElementById('n').value;
         const dim = +document.getElementById('dim').value;
@@ -573,6 +591,7 @@
         log(`(centroid mean-update ran ${tmode === 'worker' ? 'in the Worker' : 'in-thread'}; ` +
             `results are byte-identical either way)`, 'dim');
         idb.destroy();
+        hideLoader();
       };
 
       // NFR-10: a single GPU storage buffer is capped (128 MiB on many devices),
@@ -582,7 +601,8 @@
       // store (flat is exact, so results must be identical, not just close).
       document.getElementById('chunk').onclick = async () => {
         out.textContent = '';
-        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+        showLoader();
+        if (!BrowserVec.isSupported().webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
 
         const n = +document.getElementById('n').value;
         const dim = +document.getElementById('dim').value;
@@ -641,6 +661,7 @@
           db.destroy();
         }
         log(`\n→ chunked scan is exact — a corpus can now exceed one GPU buffer.`, 'ok');
+        hideLoader();
       };
 
       // GPU top-k: past a few thousand rows the flat index reduces on the GPU
@@ -650,7 +671,8 @@
       // switch-over threshold to show the readback that was eliminated.
       document.getElementById('gputopk').onclick = async () => {
         out.textContent = '';
-        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+        showLoader();
+        if (!BrowserVec.isSupported().webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
 
         const dim = +document.getElementById('dim').value;
         const k = 10;
@@ -774,6 +796,7 @@
 
         log(`\n→ GPU top-k returns the same neighbors while reading back only` +
             ` ceil(N/256)·k pairs instead of all N scores — now on the quantized and IVF paths too.`, 'ok');
+        hideLoader();
       };
 
       // M6 / NFR-7: on browsers without WebGPU the library falls back to an exact
@@ -782,7 +805,8 @@
       // returns the same top-k as the real GPU path on the same data.
       document.getElementById('cpufallback').onclick = async () => {
         out.textContent = '';
-        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+        showLoader();
+        if (!BrowserVec.isSupported().webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
 
         const dim = +document.getElementById('dim').value;
         const n = Math.min(20000, +document.getElementById('n').value);
@@ -826,14 +850,16 @@
         } finally {
           delete globalThis.__BROWSERVEC_FORCE_CPU__;
         }
+        hideLoader();
       };
 
       // M2: save to OPFS/IndexedDB, drop the instance, reload, confirm it survives.
       document.getElementById('persist').onclick = async () => {
         out.textContent = '';
+        showLoader();
         const support = BrowserVec.isSupported();
         log(`support: ${JSON.stringify(support)}`);
-        if (!support.webgpu) return log('WebGPU not available.', 'bad');
+        if (!support.webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
 
         const dim = 64;
         const name = 'demo-session';
@@ -873,6 +899,7 @@
 
         db2.destroy();
         db3.destroy();
+        hideLoader();
       };
 
       // M6: persisted snapshots + exported blobs encrypted at rest with a passphrase
@@ -880,8 +907,9 @@
       // fails loudly. Data never leaves the device — and now it's safe at rest too.
       document.getElementById('encrypt').onclick = async () => {
         out.textContent = '';
-        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
-        if (!globalThis.crypto?.subtle) return log('WebCrypto (crypto.subtle) unavailable.', 'bad');
+        showLoader();
+        if (!BrowserVec.isSupported().webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
+        if (!globalThis.crypto?.subtle) { hideLoader(); return log('WebCrypto (crypto.subtle) unavailable.', 'bad'); }
 
         const dim = 64;
         const name = 'enc-demo';
@@ -936,6 +964,7 @@
         log(`\nencrypted export→import round-trip: [${imported}]`, imported === before ? 'ok' : 'bad');
         db2.destroy();
         db3.destroy();
+        hideLoader();
       };
 
       // Deletion: rows are tombstoned (filtered from results immediately, cheap) and
@@ -944,7 +973,8 @@
       // that a reload drops them for good. Runs on fp32 and int8×IVF.
       document.getElementById('delete').onclick = async () => {
         out.textContent = '';
-        if (!BrowserVec.isSupported().webgpu) return log('WebGPU not available.', 'bad');
+        showLoader();
+        if (!BrowserVec.isSupported().webgpu) { hideLoader(); return log('WebGPU not available.', 'bad'); }
 
         const dim = 128;
         const n = 5000;
@@ -985,6 +1015,7 @@
           db.destroy();
           reloaded.destroy();
         }
+        hideLoader();
       };
     </script>
   </body>

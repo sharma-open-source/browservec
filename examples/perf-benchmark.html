@@ -39,6 +39,8 @@
   .bad { color: #d32f2f; }
   ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
   .config-note { font-size: .8rem; color: #888; margin-top: .5rem; }
+  .loader { display: none; width: 18px; height: 18px; border: 2px solid #ddd; border-top-color: #1a73e8; border-radius: 50%; animation: spin .6s linear infinite; margin-left: .5rem; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -77,6 +79,7 @@
   </label>
   <button id="runBtn">Run Benchmark</button>
   <button id="compareBtn" class="danger">Run All Indexes</button>
+  <span class="loader" id="loader"></span>
 </div>
 <div class="config-note" id="configNote"></div>
 
@@ -108,6 +111,8 @@ import { BrowserVec, hashingEmbedder } from '../src/index.ts';
 
 const $ = (id) => document.getElementById(id);
 const log = (msg, cls = '') => $('log').innerHTML += `\n${cls ? `<span class="${cls}">${msg}</span>` : msg}`;
+const showLoader = () => $('loader').style.display = 'inline-block';
+const hideLoader = () => $('loader').style.display = 'none';
 
 // ---- Generate synthetic text documents at scale ----
 // We create realistic-looking "documents" from a template system so every
@@ -411,6 +416,7 @@ async function runSingle(indexType) {
   log(`Starting benchmark: ${indexType}...`);
   $('runBtn').disabled = true;
   $('compareBtn').disabled = true;
+  showLoader();
   try {
     const results = await benchmark(corpus, dim, indexType);
     results.label += ` (${n.toLocaleString()} docs)`;
@@ -420,6 +426,7 @@ async function runSingle(indexType) {
   } finally {
     $('runBtn').disabled = false;
     $('compareBtn').disabled = false;
+    hideLoader();
   }
 }
 
@@ -430,6 +437,7 @@ async function runAll() {
 
   $('runBtn').disabled = true;
   $('compareBtn').disabled = true;
+  showLoader();
   log('');
   log(`========== COMPREHENSIVE BENCHMARK ==========`);
   log(`Corpus: ${n.toLocaleString()} synthetic documents, ${dim}-dim embeddings`);
@@ -460,6 +468,7 @@ async function runAll() {
 
   $('runBtn').disabled = false;
   $('compareBtn').disabled = false;
+  hideLoader();
 }
 
 // ---- Event handlers ----
