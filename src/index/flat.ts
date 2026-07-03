@@ -216,6 +216,7 @@ export class FlatIndex {
  */
 export function topK(scores: Float32Array, n: number, k: number): FlatHit[] {
   const limit = Math.min(k, n);
+  if (limit <= 0) return [];
   const heap: FlatHit[] = [];
   for (let row = 0; row < n; row++) {
     const score = scores[row]!;
