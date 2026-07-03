@@ -43,6 +43,8 @@ Open any via `npm run dev`:
 | [`examples/02-quantization.html`](../examples/02-quantization.html) | int8 / int4 quantization comparison |
 | [`examples/03-ivf-index.html`](../examples/03-ivf-index.html) | IVF approximate search with nprobe sweep |
 | [`examples/04-ivf-quant-combo.html`](../examples/04-ivf-quant-combo.html) | IVF × int8/int4 combo — the 1M path |
+| [`examples/18-hnsw-index.html`](../examples/18-hnsw-index.html) | HNSW graph index — efSearch sweep, recall vs speed, works without WebGPU |
+| [`examples/19-hnsw-gpu.html`](../examples/19-hnsw-gpu.html) | GPU graph search — one-dispatch beam kernel, queryBatch, CPU vs GPU crossover |
 | [`examples/05-text-retrieval.html`](../examples/05-text-retrieval.html) | End-to-end text → search |
 | [`examples/06-persistence.html`](../examples/06-persistence.html) | Save/load to OPFS/IndexedDB |
 | [`examples/07-encryption.html`](../examples/07-encryption.html) | AES-256-GCM encrypted snapshots |

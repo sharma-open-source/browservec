@@ -53,7 +53,7 @@ const info = BrowserVec.isSupported();
 if (info.webgpu) {
   // GPU-accelerated path, all configs available
 } else if (info.wasm) {
-  // CPU fallback — fp32 flat only, no quant/IVF
+  // CPU fallback — fp32 flat or HNSW (ann: { type: 'hnsw' }); no quant/IVF
 } else {
   // Neither WebGPU nor WASM — the library won't work
 }
@@ -63,7 +63,7 @@ if (info.webgpu) {
 
 `browservec` uses three features that may interact with CSP:
 
-1. **Web Workers** (quantized ingest, IVF k-means) — inlined via
+1. **Web Workers** (quantized ingest, IVF k-means, HNSW graph) — inlined via
    `?worker&inline` at build time, so no `worker-src` exception is needed.
    The worker blob is created from a base64 data URL.
 2. **WASM module** (CPU fallback) — requires `'wasm-unsafe-eval'` in
@@ -113,7 +113,7 @@ handle:
 | Error | When | How to handle |
 |---|---|---|
 | `WebGPUUnavailableError` | `create()` when WebGPU is absent and `fallback: 'error'` (default) | Fall back to CPU or show a message. Pass `fallback: 'wasm'` to auto-degrade. |
-| `"CPU fallback supports fp32 flat only"` | `create()` with `fallback: 'wasm'` + `quantBits` or `ann` | Drop quantization/IVF when targeting CPU-only environments. |
+| `"CPU fallback supports fp32 flat and HNSW only"` | `create()` with `fallback: 'wasm'` + `quantBits` or an IVF `ann` | Drop quantization/IVF when targeting CPU-only environments (HNSW — `ann: { type: 'hnsw' }` — is fine there). |
 | `"dimension must be a positive integer"` | `create()` with invalid `dimension` | Validate input. |
 | `"duplicate id: …"` | `add()`/`addBatch()` with an id already in the store | Check `db.get(id)` first, or use `update()` for upsert. |
 | `"query dim X != store dim Y"` | `query()` with wrong-dimension vector | Ensure query dimension matches store dimension. |

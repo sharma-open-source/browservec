@@ -173,6 +173,46 @@ cluster assignment uses a bit-width-specific quantized assign kernel
 (`encoder.rotateQuery`) before probing/scanning, and the scan kernel is also
 bit-width-specific.
 
+## HNSW (`src/index/hnswGraph.ts`, `hnsw.ts`, `hnsw.worker.ts`, `hnswGpu.ts`)
+
+The graph core (`hnswGraph.ts`) is allocation-light by design: adjacency lives
+in flat typed arrays (layer 0 is one `Int32Array` of count-prefixed `(2M+1)`-wide
+blocks; upper layers get a per-node `Int32Array` only for the ~1/M of nodes that
+have them), the visited set is a generation-stamped `Int32Array` (bump a counter
+instead of clearing), and the two beam heaps are reused scratch (`MinHeap` over
+parallel dist/id arrays; the results heap stores negated distances to act as a
+max-heap). Neighbor selection uses the paper's diversity heuristic — keep a
+candidate only if it's closer to the query than to every already-kept neighbor —
+which is what keeps the graph navigable *between* clusters. Distances share the
+house unrolled-×4 loops; internally smaller = closer (negated dot, or squared
+L2), so `score = -dist` matches every metric's public convention.
+
+The seam (`hnsw.ts`) mirrors `kmeansTrainer.ts`, with one difference: the Worker
+**owns** the graph and a packed corpus copy. Appends transfer vectors in;
+searches send back only the top-k arrays — so both build and CPU search run
+off the main thread. Builds are seeded-deterministic on either path.
+
+The GPU path (`graphSearch.ts` + `hnswGpu.ts`) is CAGRA-style: no hierarchy on
+the GPU — the kernel walks the flat layer-0 graph (fixed `2M` slots per row,
+`0xFFFFFFFF`-padded) seeded from the entry node plus evenly-spread rows. One
+workgroup per query keeps the whole beam state in ~12 KB of workgroup shared
+memory: a 256-slot candidate beam (dist/id/expanded), a 2048-slot open-addressed
+atomic visited hash (id+1, 0 = empty; sheds under pressure rather than stalling —
+the CPU dedups the readback), and reduction scratch. Loop-control reads go
+through `workgroupUniformLoad` so barriers stay in uniform control flow.
+Termination is exhaustion: expansion clears flags and inserts only add
+unexpanded slots when they beat the current worst, so a converged beam ends up
+fully expanded (the classic "best unexpanded > worst kept" check is a no-op in
+a fused beam — the best unexpanded *is* a kept entry). The kernel emits the raw
+beam; the CPU dedups, sorts, and takes k. Batching is free: `queryBatch` packs
+queries row-major and dispatches `nQ` workgroups in one submit.
+
+Persistence (M7c): `serializeGraph()`/`loadGraph()` snapshot and restore the
+structure (see [persistence format](#persistence-format-srcpersistformatts));
+`loadGraph` fast-forwards the level RNG one draw per restored row so post-load
+inserts draw the same levels a never-saved store would — save/load doesn't fork
+determinism.
+
 ## Worker-offload seam (`src/quant/encoder.ts`, `src/index/kmeansTrainer.ts`)
 
 Both follow the identical pattern: wrap a synchronous in-thread

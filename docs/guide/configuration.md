@@ -6,8 +6,9 @@ How to choose the right index type and parameters for your use case.
 
 ```
 Is `fallback: 'wasm'` needed? (iOS, locked-down browser, etc.)
-├── YES → CPU fallback. fp32 flat only.
-│            quantBits: 0, ann: omit
+├── YES → CPU fallback. fp32 flat, or HNSW for sub-linear queries.
+│            exact:  quantBits: 0, ann: omit
+│            ANN:    quantBits: 0, ann: { type: 'hnsw' }
 │            See [CPU fallback](../features.md#cpu-fallback--no-webgpu-nfr-7--m6)
 │
 └── NO (WebGPU available) →
@@ -26,12 +27,17 @@ Is `fallback: 'wasm'` needed? (iOS, locked-down browser, etc.)
     │       [Quantization example](../../examples/02-quantization.html)
     │
     ├── Large corpus, speed over exact recall
-    │   └── IVF fp32
-    │       quantBits: 0, ann: { nlist: 1024 }
-    │       [IVF example](../../examples/03-ivf-index.html)
+    │   ├── Batch/rebuild-tolerant ingest → IVF fp32
+    │   │       quantBits: 0, ann: { nlist: 1024 }
+    │   │       [IVF example](../../examples/03-ivf-index.html)
+    │   └── Continuous inserts, or l2 metric → HNSW
+    │           quantBits: 0, ann: { type: 'hnsw' }
+    │           add search: 'gpu' if queries arrive in batches (queryBatch)
+    │           [HNSW example](../../examples/18-hnsw-index.html) ·
+    │           [GPU graph search](../../examples/19-hnsw-gpu.html)
     │
     └── Large corpus + memory constrained
-        └── IVF × quant (the 1M path)
+        └── IVF × quant (the 1M path — HNSW is fp32-only for now)
             quantBits: 8 (or 4), ann: { nlist: 4096 }
             [IVF×quant example](../../examples/04-ivf-quant-combo.html)
 ```
@@ -58,7 +64,7 @@ too but the kernel falls back to a general loop — slightly slower per row.
 |---|---|---|
 | `'cosine'` (default) | higher = closer | General semantic similarity. Vectors are auto-normalized. |
 | `'dot'` | higher = closer | When vectors are already normalized or you want raw dot product. |
-| `'l2'` | higher = closer (negated squared distance) | When Euclidean distance matters. **Flat only** — IVF and quantized modes don't support l2 yet. |
+| `'l2'` | higher = closer (negated squared distance) | When Euclidean distance matters. **Flat and HNSW only** — IVF and quantized modes don't support l2 yet. |
 
 ### `quantBits`
 
@@ -109,6 +115,30 @@ Tuning advice:
   (e.g., at 1M rows, `nlist: 4096` gives ~244 rows/cluster on average).
 - IVF requires `metric: 'cosine'` or `'dot'` — l2 is not supported.
 
+### `ann` (HNSW)
+
+Select with `ann: { type: 'hnsw' }` (fp32 only — `quantBits` must be 0):
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `M` | 16 | Out-degree per graph layer (layer 0 keeps 2·M). Higher = better recall and more robust graphs, but more memory and slower builds. 12–48 is the practical range; ≤ 32 required for `search: 'gpu'`. |
+| `efConstruction` | 200 | Beam width while inserting. Higher = better graph quality, slower ingest. |
+| `efSearch` | 64 | Beam width at query time (clamped to ≥ k; ≤ 256 on `search: 'gpu'`). The main recall/latency knob — overridable per query. |
+| `seed` | fixed | Level RNG seed; same inserts + same seed = identical graph. |
+| `search` | `'cpu'` | `'gpu'` runs the one-dispatch beam-search kernel — pick it when queries arrive in **batches** (`queryBatch`); single queries are faster on `'cpu'`. |
+
+Tuning advice:
+
+- **`efSearch`** is the knob to sweep first (like IVF's `nprobe`). On clustered
+  data, recall@10 is typically ≳0.98 by `efSearch: 10–40`.
+- Build cost is paid **at ingest** (in a Worker, so the UI stays responsive) —
+  unlike IVF there is no rebuild after appends, so HNSW suits continuously
+  growing stores; IVF suits bulk-load-then-query.
+- HNSW supports **all metrics** including `l2`, and runs without WebGPU
+  (`fallback: 'wasm'`).
+- With `persist`/`export`, the graph is stored in the snapshot — reloads
+  restore it directly (~180× faster than rebuilding) as long as `M` matches.
+
 ### `chunkRows`
 
 GPU storage buffers have a device-dependent size cap
@@ -143,6 +173,11 @@ const db = await BrowserVec.create({
 db.query(q, {
   k: 20,           // return 20 neighbors (default 10)
   nprobe: 64,      // scan 64 clusters (IVF only)
+  efSearch: 128,   // widen the search beam (HNSW only)
   rerank: false,   // skip exact re-rank (quantized only)
 });
+
+// Many queries in one call — a single GPU dispatch on an HNSW store
+// with search: 'gpu'; a sequential loop everywhere else.
+await db.queryBatch([q1, q2, q3], { k: 10, efSearch: 64 });
 ```
