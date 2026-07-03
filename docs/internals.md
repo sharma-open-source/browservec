@@ -4,6 +4,293 @@ Subsystem-level notes for contributors touching kernels, the persistence
 format, or the Worker-offload seams. For the high-level flow, read
 [architecture.md](./architecture.md) first.
 
+**Contents:**
+- [WGSL kernel reference](#wgsl-kernel-reference)
+- [Algorithm sketches](#algorithm-sketches)
+- [GPU top-k reduction](#gpu-top-k-reduction)
+- [Device acquisition](#device-acquisition-srcenginedevicets)
+- [Store](#store-srcstorestorets)
+- [Persistence format](#persistence-format-srcpersistformatts)
+- [Encryption envelope](#encryption-envelope-srcpersistcryptots)
+- [Persistence backend selection](#persistence-backend-selection-srcpersistbackendts)
+- [Flat index](#flat-index-srcindexflatts)
+- [Quantization](#quantization-srcquant)
+- [IVF](#ivf-srcindexivfts)
+- [HNSW](#hnsw-srcindexhnswgraphts-hnsvts-hnsvworkerts-hnsvgputs)
+- [Worker-offload seam](#worker-offload-seam-srcquantencoderts-srcindexkmeanstrainerts)
+- [CPU fallback](#cpu-fallback-srcfallbackcputs-srcfallbacksimdts)
+- [Complexity & performance](#complexity--performance)
+
+---
+
+## WGSL kernel reference
+
+All distance kernels follow the same compute pattern: one workgroup loads the
+query cooperatively into shared memory (`q_shared`), then every invocation
+scores one row. Kernels are specialized at pipeline-build time with baked
+`override` constants for dimension and workgroup size.
+
+| Kernel | File | Corpus layout | Dequant | Bindings | Key constants |
+|---|---|---|---|---|---|
+| Flat distance | `wgsl/distance.ts` | `f32` × N·dim | — (native) | corpus, query, scores, params | `DIM`, `WG=64` |
+| Flat indexed (IVF) | same, `indexed=true` | same, but row = `candidates[gid]` | — | + candidates | same |
+| Top-k | `wgsl/topk.ts` | — | — | scores, partialScore, partialRow, params | `WG` (pow2), sentinel `-3.4e38` |
+| int8 distance | `wgsl/distanceQ8.ts` | `u32` × N·⌈padDim/4⌉ | `unpack4x8snorm` | corpus, query, scores, scales, params, candidates? | `paddedDim`, `WG` |
+| int4 distance | `wgsl/distanceQ4.ts` | `u32` × N·⌈padDim/8⌉ | manual nibble | same as Q8 | `paddedDim`, `WG` |
+| 1-bit distance | `wgsl/distanceQ1.ts` | `u32` × N·⌈padDim/32⌉ | sign-bit → ±1 | same as Q8 | `paddedDim`, `WG` |
+| IVF assign (fp32) | `wgsl/assign.ts` | corpus + centroids | — | corpus, centroids, clusterOut, params | `DIM`, `WG` |
+| IVF assign (int8) | `wgsl/assignQ8.ts` | `u32` corpus + fp32 centroids | `unpack4x8snorm` | corpus, centroids, clusterOut, params | `paddedDim`, `WG` |
+| IVF assign (int4) | `wgsl/assignQ4.ts` | `u32` corpus + fp32 centroids | manual nibble | same as Q8 | `paddedDim`, `WG` |
+| IVF assign (1-bit) | `wgsl/assignQ1.ts` | `u32` corpus + fp32 centroids | sign-bit → ±1 | same as Q8 | `paddedDim`, `WG` |
+| GPU graph search | `wgsl/graphSearch.ts` | `f32` corpus + `u32` adjacency | — | corpus, graph, queries, entries, outDist, outId, params | `ef=256`, `HASH_SIZE=2048` |
+| Score mask | `wgsl/mask.ts` | 1 bit/row | — | scores, mask, params | `WG` |
+
+### Common shader structure (distance family)
+
+```
+fn main(gid, lid):
+  // 1. Load query into workgroup shared memory (cooperative, each lane loads 1 vec4)
+  if lid.x < vecChunks:
+    q_shared[lid.x] = query[lid.x]
+
+  workgroupBarrier()
+
+  // 2. Each invocation scores one row
+  let row = indexed ? candidates[gid.x] : gid.x
+  scores[rowBase + gid.x] = scoreRow(row, ...)
+
+fn scoreRow(row) -> f32:
+  acc = 0
+  for each vec4-aligned chunk:
+    c = loadCorpus(row, chunk)       // native f32 or dequant
+    acc = dot(c, q_shared[chunk]) + acc
+  // metric variant: l2 uses dot(c - q, c - q) → return -acc
+  return acc * rowScale              // quantized paths scale after accumulation
+```
+
+### CAGRA-style graph search state layout
+
+The GPU graph kernel keeps its entire beam inside one workgroup's shared
+memory (~12 KB total):
+
+```
+var<workgroup> candDist: array<f32, EF>         // 256 × 4B = 1 KB
+var<workgroup> candId:   array<u32, EF>          // 256 × 4B = 1 KB
+var<workgroup> candExp:  array<u32, EF>          // 256 × 4B = 1 KB
+var<workgroup> visited:  array<atomic<u32>, 2048> // 2K × 4B = 8 KB
+var<workgroup> stgDist:  array<f32, WG>          // per-lane staging
+var<workgroup> stgId:    array<u32, WG>
+var<workgroup> redVal:   array<f32, WG>          // reduction scratch
+var<workgroup> redIdx:   array<u32, WG>
+```
+
+Each iteration: (a) argmin-reduce over unexpanded slots for the best
+candidate, (b) fan its K neighbors across lanes, (c) check the lock-free
+hash (Fibonacci-probe, 16 attempts max), (d) compute distance for unseen
+neighbors, (e) argmax-reduce to fold improving neighbors into the beam.
+
+---
+
+## Algorithm sketches
+
+### HNSW insert (`hnswGraph.ts:insert`)
+
+```
+function insert(row):
+  level = randomLevel()            // geometric: P(level ≥ l) = M^-l
+  curr = entry, currD = dist(row, entry)
+
+  // Phase 1: greedily descend through layers above `level`
+  for l = top down to level + 1:
+    curr, currD = greedySearch(row, curr, currD, l)
+
+  // Phase 2: per-layer beam search + diversity heuristic
+  for l = min(level, top) down to 0:
+    visited = searchLayer(row, curr, currD, efConstruction, l)
+    neighbors = selectHeuristic(visited, maxDegree(l))
+    for each n in neighbors:
+      bidirectionalLink(row, n, l)
+    curr, currD = nearest(neighbors), dist(row, nearest)
+
+  if level > top: top = level; entry = row
+```
+
+### HNSW searchLayer (`hnswGraph.ts:searchLayer`)
+
+```
+function searchLayer(q, entry, entryD, ef, level):
+  cand = MinHeap()        // ordered by distance (closest first)
+  res  = MaxHeap()        // negated distances (worst first)
+  cand.push({ id: entry, d: entryD })
+  res.push({ id: entry, d: entryD })
+  visited = { entry }
+
+  while cand is not empty:
+    curr = cand.pop()
+    if curr.d > res.peek().d: break    // furthest kept is closer than best candidate
+
+    for nb in neighbors(curr, level):
+      if nb not visited:
+        visited.add(nb)
+        d = dist(q, nb)
+        if res.size < ef or d < res.peek().d:
+          cand.push({ id: nb, d })
+          res.push({ id: nb, d })
+          if res.size > ef: res.pop()  // evict worst
+
+  return result list (sorted by distance)
+```
+
+### K-means Lloyd (`src/index/kmeans.ts`)
+
+```
+function kmeans(sample, n, nlist, dim, iters):
+  centroids = kmeansppInit(sample, nlist, dim)     // D²-weighted random pick
+  for iter in 0..iters:
+    assign = Array(n)                                // GPU does this in IVF build
+    for i in 0..n:
+      assign[i] = argmin distance(sample[i], centroids[j])  // over all j
+
+    newCentroids = zeros(nlist, dim)
+    counts = zeros(nlist)
+    for i in 0..n:
+      newCentroids[assign[i]] += sample[i]
+      counts[assign[i]]++
+
+    for j in 0..nlist:
+      if counts[j] > 0:
+        centroids[j] = newCentroids[j] / counts[j]
+        normalize(centroids[j])                       // spherical for cosine/dot
+      else:
+        centroids[j] = sample[random(n)]              // re-seed empty clusters
+
+    if no assignments changed: break
+  return centroids
+```
+
+### CAGRA-style GPU beam search (one workgroup, one query)
+
+```
+function gpuBeamSearch(q, corpus, graph, K, ef):
+  // shared memory state: candDist[id/idExp], visited[hashSize]
+  init: fill beam with INF/EMPTY/EXPANDED
+  seed from entry node + evenly-spread rows
+  mark seeded as unexpanded
+
+  loop:
+    // argmin over unexpanded: best = min { candDist[i] | candExp[i]==0 }
+    bestIdx = parallelArgmin(candDist, candExp)
+
+    if candDist[bestIdx] >= INF: break        // beam exhausted
+    candExp[bestIdx] = 1                       // mark expanded
+
+    // fan-out: each lane loads one neighbor
+    for t in 0..K parallel:                   // one lane per neighbor
+      nb = graph[bestId * K + t]
+      if nb == EMPTY: continue
+      if visitedLookup(nb) == SEEN: continue
+
+      d = distance(q, corpus[nb])
+      // argmax over beam: worst = max { candDist[i] }
+      worstIdx = parallelArgmax(candDist)
+      if d < candDist[worstIdx]:
+        candDist[worstIdx] = d
+        candId[worstIdx] = nb
+        candExp[worstIdx] = 0                // mark unexpanded
+
+  output: raw beam (ef × {dist, id})
+  CPU: dedup, sort, take top-k
+```
+
+---
+
+## GPU top-k reduction
+
+Past `GPU_TOPK_MIN_ROWS` (4096), score reduction happens on the GPU instead
+of reading back all N scores and sorting on the CPU. This avoids a ~N·4B
+transfer plus an O(N·k) CPU pass for every query at large N.
+
+### Layout
+
+- **Input:** dense `scores: array<f32>` of length N (post-mask, if filtering)
+- **Output:** `partialScore: array<f32>` and `partialRow: array<u32>`,
+  each `ceil(N / WG) * k` entries
+
+### Per-workgroup algorithm
+
+```
+// Each workgroup owns a contiguous segment of WG scores.
+// We run k rounds — each extracts one more (score, row) from the segment.
+
+for round in 0..k:
+  // Copy segment to shared memory
+  seg[lid] = scores[workgroupOffset + lid]
+
+  // Parallel reduction: halving stride until one lane holds the max
+  redVal[lid] = seg[lid]
+  redIdx[lid] = workgroupOffset + lid
+  for stride = WG/2 down to 1:
+    if lid < stride:
+      if redVal[lid] < redVal[lid + stride]:
+        redVal[lid] = redVal[lid + stride]
+        redIdx[lid] = redIdx[lid + stride]
+
+  // Lane 0 writes the winner
+  if lid == 0:
+    outputSlot = workgroupId * k + round
+    partialScore[outputSlot] = redVal[0]
+    partialRow[outputSlot] = redIdx[0]
+    // Invalidate the winner's slot for the next round
+    seg[redIdx[0] - workgroupOffset] = -FLT_MAX
+```
+
+The CPU then merges `ceil(N/WG) * k` partial pairs — a trivial sort of at
+most a few thousand items even at N=1M.
+
+### Engagement gate
+
+`GpuTopK.beneficial(n, k)` returns true only when `ceil(n/WG)·k < n` — i.e.
+when the partials list is strictly shorter than reading all N scores. For
+int4 (rerankFactor=16, so effective k is `k·16`) the partials list may not
+be shorter, and the path correctly falls back to full readback.
+
+---
+
+## Complexity & performance
+
+| Index type | Build | Query (per single) | Query (batch) | Memory |
+|---|---|---|---|---|
+| Flat fp32 | O(N·dim) upload | `O(N·dim)` GPU | `O(N·dim)` GPU, no reuse | 4N·dim |
+| Flat int8 | O(N·dim) rotate + quantize | `O(N·padDim)` GPU | same | 4N·padDim/4 ≈ N·padDim |
+| Flat int4 | O(N·dim) rotate + quantize | `O(N·padDim)` GPU | same | N·padDim/2 |
+| Flat 1-bit | O(N·dim) rotate + quantize | `O(N·padDim)` GPU | same | N·padDim/8 |
+| IVF fp32 | O(iters·trainSize·nlist·dim) + O(N·nlist·dim) assign | `O(N/nlist · nprobe · dim)` GPU | same | base + nlist·dim centroids |
+| IVF int8 | same + rotate/quantize per row | `O(N/nlist · nprobe · padDim)` GPU | same | ~N·padDim/4 + centroids |
+| HNSW (CPU) | O(N·efConstruction·M·log N) | O(ef·log N) hops × O(dim) | sequential | ~2N·M·4B adjacency |
+| HNSW (GPU) | same build (CPU) | same beam cost + dispatch overhead | `O(nQ·ef·K·padDim)` GPU | base + N·K·4B adjacency |
+| CPU fallback | O(N·dim) ingest | O(N·dim) SIMD | sequential | 4N·dim |
+
+### When each index wins
+
+- **Flat fp32:** N < 100k, simple, exact, no tuning.
+- **Flat int8:** N ~ 100k–1M, memory-constrained, single queries (GPU still
+  helps). Recall 1.0 after re-rank.
+- **IVF × int8:** N > 500k, the 1M path. Picks ~1-5% of corpus per query.
+  `nprobe` / `rerankFactor` tune the speed–recall trade.
+- **HNSW (CPU):** N ~ 10k–500k, needs l2 metric, no GPU, or incremental
+  inserts without rebuild pauses. Also the only ANN that works under the
+  CPU fallback.
+- **HNSW (GPU):** N > 50k, many batched queries (`queryBatch` ≥ 64),
+  same recall as CPU HNSW but ~4× lower latency per query at batch scale.
+
+### Bottleneck by scale
+
+| N | Bottleneck | Dominant cost |
+|---|---|---|
+| < 10k | ALU / dispatch | GPU dispatch + readback overhead per query |
+| 10k–500k | GPU ALU (flat) or bandwidth (quant) | Dot-product math; quant is ALU-bound until ~1M |
+| > 1M | GPU bandwidth + CPU re-rank | Reading codes from GPU memory; CPU-side rerank over candidate pool |
+
 ## Device acquisition (`src/engine/device.ts`)
 
 - `DeviceContext { adapter, device, limits, lost }` — `lost` flips `true`
