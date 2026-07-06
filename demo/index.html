@@ -304,7 +304,10 @@
         // by browser, e.g. iOS WebKit has no OPFS), and does a save→reload survive?
         try {
           const name = 'm6probe';
-          const p1 = await BrowserVec.create({ dimension: dim, metric: 'cosine', fallback: 'wasm', persist: { name } });
+          // autoLoad:false so the writer always starts EMPTY — otherwise on a device
+          // where persistence works (e.g. iOS Safari + OPFS) a re-run auto-loads the
+          // previously-saved 500 rows and addBatch re-inserts v0.. → "duplicate id: v0".
+          const p1 = await BrowserVec.create({ dimension: dim, metric: 'cosine', fallback: 'wasm', persist: { name, autoLoad: false } });
           await p1.addBatch(records.slice(0, 500));
           await p1.save();
           const backend = p1.stats().persist || null;
