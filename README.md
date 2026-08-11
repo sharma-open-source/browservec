@@ -13,14 +13,7 @@ client-side, no server round-trip.
 
 ## Status
 
-M1–M5 and M7 complete, M6 mostly complete (encryption, CPU/WASM fallback done;
-cross-device tuning in progress). In short: flat brute-force + two ANN families —
-IVF clustering and an HNSW graph index (with an optional GPU beam-search kernel
-and batched queries) — fp32/int8/int4/1-bit quantization (and every IVF×quant
-combination), OPFS/IndexedDB persistence (HNSW graphs persist too, so loads skip
-the rebuild) with optional AES-256-GCM encryption, an on-device text embedder,
-Worker-offloaded ingest and index builds, and a WASM-SIMD CPU fallback for
-devices without WebGPU. See [CHANGELOG.md](./CHANGELOG.md) for the release
+See [CHANGELOG.md](./CHANGELOG.md) for the release
 history and [Not yet here](#not-yet-here) below for open milestone work.
 
 ## Install
